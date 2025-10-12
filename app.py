@@ -1,4 +1,4 @@
-# app.py — gráficos responsivos (Streamlit + Altair) con toggles en leyenda
+# app.py — muestra Admitidos como ingresantes reales y métricas junto a capacidad
 # requirements.txt: streamlit, numpy, pandas, altair
 
 import streamlit as st
@@ -15,7 +15,7 @@ def sidebar_basic(p: Params):
     p.years = st.sidebar.slider("Años de simulación", 5, 40, p.years)
     p.demanda_potencial = st.sidebar.number_input("Demanda potencial (alumnos)", 100, 500000, p.demanda_potencial, 100)
     p.cupo_optimo = st.sidebar.number_input("Cupo ÓPTIMO por aula (calidad)", 10, 60, p.cupo_optimo)
-    p.cupo_maximo = st.sidebar.number_input("Cupo MÁXIMO por aula (capacidad dura)", 10, 80, p.cupo_maximo)
+    p.cupo_maximo = st.sidebar.number_input("Cupo MÁXIMO por aula (referencia)", 10, 80, p.cupo_maximo)
 
     st.sidebar.header("Calidad y bajas")
     p.calidad_base = st.sidebar.slider("Calidad base", 0.0, 1.0, p.calidad_base, 0.01)
@@ -61,14 +61,17 @@ def fold(df: pd.DataFrame, cols: list[str], x="Año") -> pd.DataFrame:
     return df[[x] + cols].melt(id_vars=[x], value_vars=cols, var_name="serie", value_name="valor")
 
 def alt_lines(df_long: pd.DataFrame, title: str, y_title: str):
-    sel = alt.selection_point(fields=["serie"], bind="legend")
+    sel = alt.selection_point(fields=["serie"], bind="legend")  # toggle por leyenda
     base = alt.Chart(df_long).encode(
         x=alt.X("Año:Q"),
         y=alt.Y("valor:Q", title=y_title),
         color=alt.Color("serie:N", legend=alt.Legend(orient="bottom", columns=3)),
         tooltip=["Año","serie","valor"]
     ).add_params(sel).transform_filter(sel)
-    return base.mark_line() + base.mark_circle(size=28)
+    return (base.mark_line() + base.mark_circle(size=28)).properties(title=title).interactive()
+
+def choose_series(label: str, options: list[str], default: list[str]) -> list[str]:
+    return st.multiselect(label, options=options, default=default, key=label)
 
 # --------- Estado ---------
 if "params" not in st.session_state:
@@ -81,12 +84,11 @@ tab_inicio, tab_sim, tab_mkt, tab_costos, tab_coh, tab_exp, tab_export = st.tabs
 # --------- Inicio ---------
 with tab_inicio:
     st.markdown("""
-**Resumen del modelo:**
-- **Stock de candidatos**: Marketing compra candidatos (Budget/CAC). La **Selección** mueve candidatos → alumnos (G1) limitado por **capacidad dura** (Aulas × cupo MÁX) y **demanda**.
-- **Egresados**: son los alumnos de **G12 del año anterior**.
-- **Capacidad dura**: `Aulas × cupo MÁX`. **Hacinamiento (calidad)** usa `cupo ÓPTIMO`.
-- **Calidad** mejora con inversión por alumno, inversión en infraestructura y mantenimiento neto de depreciación.
-- **Pipeline**: slider de inicio (−1 desactiva) agrega **1 división por grado** durante 12 años.
+**Puntos clave:**
+- **Admitidos** = ingresantes reales al sistema (flujo de entrada), no se topean por capacidad; la capacidad **Óptima** y **Máxima** se usan para calidad y referencia.
+- **Stock Alumnos**: `Alumnos(t+1) = Alumnos(t) + Admitidos(t) − Bajas(t) − Egresados(t)`.
+- **Egresados**: alumnos de **G12 del año anterior**.
+- **Pipeline**: año de inicio (−1 desactiva) agrega **1 división/ grado** durante 12 años.
     """)
 
 # --------- Simulación ---------
@@ -95,27 +97,38 @@ with tab_sim:
     p = st.session_state.params
     df, _ = simulate(p)
 
+    # Métricas (mostrar Admitidos junto a capacidades)
     c1, c2, c3 = st.columns(3)
-    with c1: st.metric("Alumnos (0→fin)", f"{int(df['AlumnosTotales'].iloc[0])} → {int(df['AlumnosTotales'].iloc[-1])}")
-    with c2: st.metric("Capacidad máx (fin)", f"{int(df['CapacidadMaxTotal'].iloc[-1])}")
-    with c3: st.metric("Resultado Neto (fin)", f"${df['ResultadoNeto'].iloc[-1]:,.0f}")
+    with c1: st.metric("Capacidad Ópt (fin)", f"{int(df['CapacidadOptTotal'].iloc[-1])}")
+    with c2: st.metric("Capacidad Máx (fin)", f"{int(df['CapacidadMaxTotal'].iloc[-1])}")
+    with c3: st.metric("Admitidos (últ. año)", f"{int(df['Admitidos'].iloc[-1])}")
+
+    c4, c5, c6 = st.columns(3)
+    with c4: st.metric("Alumnos (0→fin)", f"{int(df['AlumnosTotales'].iloc[0])} → {int(df['AlumnosTotales'].iloc[-1])}")
+    with c5: st.metric("Resultado Neto (fin)", f"${df['ResultadoNeto'].iloc[-1]:,.0f}")
+    with c6: st.metric("Calidad (fin)", f"{df['Calidad'].iloc[-1]:.2f}")
 
     col1, col2 = st.columns(2)
     with col1:
-        # Alumnos y capacidad (toggler en leyenda)
-        ac = df[["Año","AlumnosTotales","CapacidadMaxTotal","CapacidadOptTotal"]].rename(
-            columns={"CapacidadMaxTotal":"Capacidad Máx","CapacidadOptTotal":"Capacidad Ópt"}
-        )
         st.subheader("Alumnos y Capacidad")
-        st.altair_chart(alt_lines(fold(ac, ["AlumnosTotales","Capacidad Máx","Capacidad Ópt"]), "", "Cantidad"), use_container_width=True)
+        ac_all = ["AlumnosTotales","Capacidad Máx","Capacidad Ópt"]
+        ac_df = df[["Año","AlumnosTotales","CapacidadMaxTotal","CapacidadOptTotal"]].rename(
+            columns={"CapacidadMaxTotal":"Capacidad Máx","CapacidadOptTotal":"Capacidad Ópt"})
+        ac_sel = choose_series("Series (Alumnos/Capacidad)", ac_all, ac_all)
+        if ac_sel:
+            st.altair_chart(alt_lines(fold(ac_df, ac_sel), "", "Cantidad"), use_container_width=True)
+        else:
+            st.info("Seleccioná al menos una serie.")
 
     with col2:
-        # Ingresos (seleccionados), Egresos y Bajas
-        st.subheader("Ingresos, Egresos y Bajas")
-        flows = df[["Año","Seleccionados","Egresados","BajasTotales"]]
-        st.altair_chart(alt_lines(fold(flows, ["Seleccionados","Egresados","BajasTotales"]), "", "Personas/año"), use_container_width=True)
+        st.subheader("Admitidos, Egresados y Bajas")
+        flows_all = ["Admitidos","Egresados","BajasTotales"]
+        flows_sel = choose_series("Series (Flujos)", flows_all, flows_all)
+        if flows_sel:
+            st.altair_chart(alt_lines(fold(df, flows_sel), "", "Personas/año"), use_container_width=True)
+        else:
+            st.info("Seleccioná al menos una serie.")
 
-    # Calidad percibida
     st.subheader("Calidad percibida")
     st.line_chart(df, x="Año", y="Calidad", use_container_width=True)
 
@@ -133,16 +146,26 @@ with tab_mkt:
         st.subheader("Candidatos (stock)")
         st.line_chart(df, x="Año", y="CandidatosStock", use_container_width=True)
 
-        st.subheader("Flujos: nuevos candidatos y seleccionados")
-        st.altair_chart(alt_lines(fold(df, ["NuevosCandidatos","Seleccionados"]), "", "Personas/año"), use_container_width=True)
+        st.subheader("Flujos: nuevos candidatos y admitidos")
+        fl_all = ["NuevosCandidatos","Admitidos"]
+        fl_sel = choose_series("Series (Funnel)", fl_all, fl_all)
+        if fl_sel:
+            st.altair_chart(alt_lines(fold(df, fl_sel), "", "Personas/año"), use_container_width=True)
+        else:
+            st.info("Seleccioná al menos una serie.")
 
     with c2:
         st.subheader("Budget y CAC")
-        st.altair_chart(alt_lines(fold(df, ["Marketing","CAC"]), "", "Valor"), use_container_width=True)
+        bc_all = ["Marketing","CAC"]
+        bc_sel = choose_series("Series (Budget/CAC)", bc_all, bc_all)
+        if bc_sel:
+            st.altair_chart(alt_lines(fold(df, bc_sel), "", "Valor"), use_container_width=True)
+        else:
+            st.info("Seleccioná al menos una serie.")
         st.subheader("Calidad (para conversión)")
         st.line_chart(df, x="Año", y="Calidad", use_container_width=True)
 
-# --------- Finanzas (OPEX compuesto + Facturación) ---------
+# --------- Finanzas ---------
 with tab_costos:
     sidebar_costos_inversion(st.session_state.params)
     p = st.session_state.params
@@ -152,18 +175,27 @@ with tab_costos:
     st.line_chart(df, x="Año", y="Facturacion", use_container_width=True)
 
     st.subheader("Composición OPEX (stacked)")
-    opex_long = fold(df, ["Sueldos","InversionInfra","InversionCalidadAlumno","Mantenimiento","Marketing","DocentesNuevas"])
-    stack = alt.Chart(opex_long).mark_area().encode(
-        x="Año:Q",
-        y=alt.Y("valor:Q", stack="zero", title="$ por año"),
-        color=alt.Color("serie:N", legend=alt.Legend(orient="bottom", columns=3)),
-        tooltip=["Año","serie","valor"]
-    )
-    st.altair_chart(stack.interactive(), use_container_width=True)
+    opex_all = ["Sueldos","InversionInfra","InversionCalidadAlumno","Mantenimiento","Marketing","DocentesNuevas"]
+    opex_sel = choose_series("Partidas OPEX", opex_all, opex_all)
+    if opex_sel:
+        opex_long = fold(df, opex_sel)
+        stack = alt.Chart(opex_long).mark_area().encode(
+            x="Año:Q",
+            y=alt.Y("valor:Q", stack="zero", title="$ por año"),
+            color=alt.Color("serie:N", legend=alt.Legend(orient="bottom", columns=3)),
+            tooltip=["Año","serie","valor"]
+        ).interactive()
+        st.altair_chart(stack, use_container_width=True)
+    else:
+        st.info("Seleccioná al menos una partida de OPEX.")
 
     st.subheader("Resultados")
-    res_long = fold(df, ["ResultadoOperativo","ResultadoNeto"])
-    st.altair_chart(alt_lines(res_long, "", "$ por año"), use_container_width=True)
+    res_all = ["ResultadoOperativo","ResultadoNeto"]
+    res_sel = choose_series("Series (Resultados)", res_all, res_all)
+    if res_sel:
+        st.altair_chart(alt_lines(fold(df, res_sel), "", "$ por año"), use_container_width=True)
+    else:
+        st.info("Seleccioná al menos una serie.")
 
 # --------- Cohortes ---------
 with tab_coh:
@@ -177,7 +209,7 @@ with tab_coh:
         y=alt.Y("Grado:O", sort=g_cols),
         color=alt.Color("Alumnos:Q", scale=alt.Scale(scheme="blues")),
         tooltip=["Año","Grado","Alumnos"]
-    ).properties(height=560)  # más alto para mejor lectura
+    ).properties(height=560)
     st.altair_chart(heat, use_container_width=True)
     st.caption("Tabla (primeros años)")
     st.dataframe(gdf.head(20), use_container_width=True)
