@@ -172,7 +172,12 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         # Admitidos (ingresantes reales): objetivo y política, limitados por demanda (no por capacidad)
         gap_demanda = max(Demanda[k] - alumnos_k, 0.0)
         adm_teor = min(par.alumnos_admitidos_objetivo, par.politica_seleccion * Cand[k])
-        admitidos[k] = min(adm_teor, gap_demanda)
+
+        # Tope por capacidad de 1º grado (divisiones de G1 × cupo máximo por aula)
+        capacidad_g1_max = float(Div[k, 0] * par.cupo_maximo)
+
+        # Ingresantes reales limitados por: política/objetivo, demanda y capacidad G1
+        admitidos[k] = min(adm_teor, gap_demanda, capacidad_g1_max)
 
         # Rechazados: limpian el stock de candidatos (salen del sistema)
         rechazados[k] = max(Cand[k] - admitidos[k], 0.0)
