@@ -247,24 +247,23 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
             # 2) Alumnos por grado (t -> t+1)
             next_G = np.zeros(G, dtype=float)
 
-            # G1(t+1): entran Admitidos; (bajas en G1 = 0 por diseño actual)
-            next_G[0] = Gk[k, 0] + admitidos[k]
+            # G1(t+1): entran Admitidos (no hay arrastre del G1 actual)
+            next_G[0] = admitidos[k]
 
             # Promoción Gi-1 -> Gi para i = 2..11 (índices 1..10)
-            # Bajas SOLO en G3..G10 (índices 2..9); por fuera de ese rango, bajas_vec = 0
+            # Bajas SOLO en G3..G10 (índices 2..9); fuera de ese rango, bajas_vec = 0
             for gi in range(1, 11):  # G2..G11
                 bajas_prev = bajas_vec[gi-1] if 2 <= gi-1 <= 9 else 0.0
-                bajas_here = bajas_vec[gi]   if 2 <= gi   <= 9 else 0.0
-                promo = Gk[k, gi-1] - bajas_prev
-                next_G[gi] = Gk[k, gi] + promo - bajas_here
+                next_G[gi] = max(Gk[k, gi-1] - bajas_prev, 0.0)
 
-            # G12(t+1): traspaso directo desde G11(t) menos bajas en G11 (actualmente 0)
-            bajas_11 = bajas_vec[10] if 2 <= 10 <= 9 else 0.0  # = 0 con política actual
+            # G12(t+1): traspaso directo desde G11(t) (menos bajas en G11 si las hubiera)
+            bajas_11 = bajas_vec[10] if 2 <= 10 <= 9 else 0.0  # = 0 con la política actual (bajas sólo G3..G10)
             next_G[11] = max(Gk[k, 10] - bajas_11, 0.0)
 
-            # Importante: NO restar egresados aquí.
-            # Egresados(t) se define simplemente como G12(t) (los que estaban al cierre del año).
-            
+            # Nota: NO sumar Gk[k, gi] a next_G[gi]; todos avanzan de grado en Δt=1 año.
+            # Egresados(t) se define como G12(t) y no se resta aquí.
+
+
             # 3) Divisiones
             next_D = Div[k, :].copy()
             if build:
