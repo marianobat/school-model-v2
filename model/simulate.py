@@ -36,13 +36,14 @@ class Params:
     cuota_mensual: float = 500.0
     meses: int = 12
 
-    # Sueldos fijos: docentes por aula + no docentes
+    # Sueldos fijos
     costo_docente_por_aula: float = 100_000.0
     sueldos_no_docentes: float = 200_000.0
 
-    inversion_infra_anual: float = 200_000.0   # OPEX con impacto en calidad
-    inversion_calidad_por_alumno: float = 200.0
-    mantenimiento_pct_facturacion: float = 0.08
+    # "Deseos" de inversión (sujetas a tope por rentabilidad)
+    inversion_infra_anual: float = 200_000.0   # target
+    inversion_calidad_por_alumno: float = 200.0  # target por alumno
+    mantenimiento_pct_facturacion: float = 0.08  # costo "obligatorio" (no se recorta)
 
     # Activos / depreciación
     activos_inicial: float = 2_000_000.0
@@ -56,10 +57,10 @@ class Params:
     caja_inicial: float = 500_000.0
     pct_capex_financiado: float = 0.60     # % del CAPEX financiado con deuda
     tasa_interes_deuda: float = 0.12       # interés anual simple sobre saldo
-    anos_amortizacion_deuda: int = 10      # amortización lineal aproximada
+    anos_amortizacion_deuda: int = 10      # amortización lineal
     deuda_inicial: float = 0.0
 
-    # Iniciales de stocks académicos
+    # Iniciales académicos
     g_inicial: int = 50                   # alumnos por grado inicial
     candidatos_inicial: float = 100.0     # stock de candidatos inicial
 
@@ -103,10 +104,10 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     calidad = np.zeros(T+1)
     facturacion = np.zeros(T+1)
     sueldos = np.zeros(T+1)
-    inv_infra = np.zeros(T+1)
-    inv_calidad_alumno = np.zeros(T+1)
-    mantenimiento = np.zeros(T+1)
-    marketing = np.zeros(T+1)
+    inv_infra = np.zeros(T+1)               # realizadas (limitadas)
+    inv_calidad_alumno = np.zeros(T+1)      # realizadas (limitadas)
+    mantenimiento = np.zeros(T+1)           # % de facturación (obligatorio)
+    marketing = np.zeros(T+1)               # realizado (limitado)
     costos_opex = np.zeros(T+1)
 
     resultado_operativo = np.zeros(T+1)
@@ -157,36 +158,52 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
             hac_k = np.maximum(0.0, (Gk[k, :] - Cap_opt_k) / np.maximum(Cap_opt_k, 1.0))
         hac_prom = 0.0 if alumnos_k <= 0 else float(np.dot(Gk[k, :], hac_k) / alumnos_k)
 
-        # Facturación y costos base
+        # Facturación
         facturacion[k] = alumnos_k * par.cuota_mensual * par.meses
 
-        # Sueldos fijos: docentes por aula + no docentes
+        # Costos "obligatorios": sueldos y mantenimiento
         sueldos[k] = par.costo_docente_por_aula * aulas_k + par.sueldos_no_docentes
-
-        inv_infra[k] = par.inversion_infra_anual
-        inv_calidad_alumno[k] = par.inversion_calidad_por_alumno * alumnos_k
         mantenimiento[k] = par.mantenimiento_pct_facturacion * facturacion[k]
 
-        # Marketing (budget) y CAC
+        # Targets de inversión (discrecionales): infra, calidad por alumno, marketing
+        target_infra = par.inversion_infra_anual
+        target_calidad = par.inversion_calidad_por_alumno * alumnos_k
+        # Marketing target depende de margen provisional y saturación (como antes)
+        # Margen provisional sin discrecionales:
+        margen_prov = facturacion[k] - (sueldos[k] + mantenimiento[k])
         saturacion = 0.0 if Demanda[k] <= 0 else min(1.0, alumnos_k / Demanda[k])
-        margen_prov = facturacion[k] - (sueldos[k] + inv_calidad_alumno[k] + inv_infra[k] + mantenimiento[k])
-        marketing[k] = max(par.mkt_floor, par.mkt_floor + par.prop_mkt * max(margen_prov, 0.0))
         cac[k] = par.cac_base * (1.0 + par.k_saturacion * saturacion)
+        target_mkt = max(par.mkt_floor, par.mkt_floor + par.prop_mkt * max(margen_prov, 0.0))
+
+        # Asignación con restricción presupuestaria: disponible para discrecionales
+        disponible = max(margen_prov, 0.0)
+        deseos = np.array([target_infra, target_calidad, target_mkt], dtype=float)
+        total_deseos = float(deseos.sum())
+
+        if total_deseos <= disponible + 1e-9:
+            inv_infra[k], inv_calidad_alumno[k], marketing[k] = deseos
+        else:
+            if total_deseos > 0:
+                ratio = disponible / total_deseos
+                inv_infra[k], inv_calidad_alumno[k], marketing[k] = deseos * ratio
+            else:
+                inv_infra[k] = inv_calidad_alumno[k] = marketing[k] = 0.0
+
+        # Nuevos candidatos según marketing realizado
         nuevos_candidatos[k] = 0.0 if cac[k] <= 0 else marketing[k] / cac[k]
 
-        # Admitidos: política y límites (demanda y capacidad G1)
+        # Admitidos (limitados por demanda y capacidad G1)
         gap_demanda = max(Demanda[k] - alumnos_k, 0.0)
         adm_teor = par.politica_seleccion * Cand[k]
         capacidad_g1_max = float(Div[k, 0] * par.cupo_maximo)  # divisiones actuales de G1 * cupo máx
         admitidos[k] = min(adm_teor, gap_demanda, capacidad_g1_max)
 
-        # Rechazados: limpian el stock de candidatos
+        # Rechazados
         rechazados[k] = max(Cand[k] - admitidos[k], 0.0)
 
-        # Bajas: SOLO entre G3..G10 (aleatorias proporcionales al tamaño)
+        # Bajas aleatorias SOLO en G3..G10
         calidad_prev = calidad[k-1] if k > 0 else par.calidad_base
         tasa_bajas_total = min(1.0, par.tasa_bajas_imprevistas + (1.0 - calidad_prev) * par.tasa_bajas_max_por_calidad)
-
         bajas_vec = np.zeros(G, dtype=float)
         segmento = Gk[k, 2:10].copy()  # G3..G10
         total_segmento = float(segmento.sum())
@@ -202,7 +219,7 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
 
         # Calidad con efectos de inversión y mantenimiento vs depreciación
         dep = par.tasa_depreciacion_anual * Act[k]
-        inv_alum_norm = (par.inversion_calidad_por_alumno / max(par.ref_inv_alumno, 1e-9))
+        inv_alum_norm = ( (inv_calidad_alumno[k] / max(alumnos_k,1e-9)) / max(par.ref_inv_alumno, 1e-9) ) if alumnos_k > 0 else 0.0
         infra_norm = (inv_infra[k] / max(par.ref_infra, 1e-9))
         mant_norm = ((mantenimiento[k] - dep) / max(par.ref_mant, 1e-9))
         calidad_raw = (par.calidad_base
@@ -213,7 +230,7 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         calidad[k] = float(np.clip(calidad_raw, 0.0, 1.0))
 
         # OPEX y resultados
-        costos_opex[k] = sueldos[k] + inv_infra[k] + inv_calidad_alumno[k] + mantenimiento[k] + marketing[k]
+        costos_opex[k] = sueldos[k] + mantenimiento[k] + inv_infra[k] + inv_calidad_alumno[k] + marketing[k]
         resultado_operativo[k] = facturacion[k] - costos_opex[k]
 
         if k < T:
@@ -233,19 +250,20 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
                 amortizacion_deuda[k] = 0.0
 
             # Resultado neto (flujo de caja)
+            # Costos totales cash = OPEX + CAPEX propio + intereses + amortización
             resultado_neto[k] = resultado_operativo[k] - capex_propio[k] - interes_deuda[k] - amortizacion_deuda[k]
 
             # Evolución de stocks:
             # 1) Candidatos
             next_C = max(Cand[k] + nuevos_candidatos[k] - admitidos[k] - rechazados[k], 0.0)
 
-            # 2) Alumnos por grado (t -> t+1) — AVANCE COMPLETO ANUAL
+            # 2) Alumnos por grado (avance completo anual)
             next_G = np.zeros(G, dtype=float)
             next_G[0] = admitidos[k]  # G1(t+1)
             for gi in range(1, 11):   # G2..G11
                 bajas_prev = bajas_vec[gi-1] if 2 <= gi-1 <= 9 else 0.0
                 next_G[gi] = max(Gk[k, gi-1] - bajas_prev, 0.0)
-            # G12(t+1) = G11(t) - bajas_11 (no aplicamos bajas en G11 por política actual)
+            # G12(t+1) = G11(t)
             next_G[11] = max(Gk[k, 10], 0.0)
 
             # 3) Divisiones (agregar una por tramo del pipeline en 12 años)
@@ -299,9 +317,12 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     # Redondeo de presentación
     def rint(a): return np.rint(a).astype(int)
 
-    # KPIs de rentabilidad (manejo de división por cero)
+    # KPIs de rentabilidad (en $/año ya están; márgenes en % por si se requieren)
     margen_operativo = np.where(facturacion > 0, resultado_operativo / facturacion, 0.0)
     margen_neto = np.where(facturacion > 0, resultado_neto / facturacion, 0.0)
+
+    # Costos Totales "cash" (para gráfico comparativo)
+    costos_totales_cash = costos_opex + capex_propio + interes_deuda + amortizacion_deuda
 
     df = pd.DataFrame({
         "Año": t,
@@ -317,7 +338,8 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         "InversionCalidadAlumno": inv_calidad_alumno,
         "Mantenimiento": mantenimiento,
         "Marketing": marketing,
-        "CostosOPEX": sueldos + inv_infra + inv_calidad_alumno + mantenimiento + marketing,
+        "CostosOPEX": costos_opex,
+        "CostosTotalesCash": costos_totales_cash,
         "ResultadoOperativo": resultado_operativo,
         "CAPEX_Total": capex_total,
         "CAPEX_Propio": capex_propio,
@@ -327,8 +349,8 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         "ResultadoNeto": resultado_neto,
         "Caja": Caja,
         "Deuda": Deuda,
-        "MargenOperativo": margen_operativo,  # 0..1
-        "MargenNeto": margen_neto,            # 0..1
+        "MargenOperativo": margen_operativo,
+        "MargenNeto": margen_neto,
         "CAC": cac,
         "CandidatosStock": rint(Cand),
         "NuevosCandidatos": rint(nuevos_candidatos),
