@@ -1,5 +1,9 @@
-# app.py — Streamlit con: Rechazados, Demanda decreciente, Caja/Deuda, CAPEX financiado,
-# migración de Params y keys únicos para widgets en pestañas repetidas.
+# app.py — Streamlit actualizado:
+# - Sueldos fijos (docentes por aula + no docentes)
+# - Sin "docente por aula nueva" ni "admitidos objetivo"
+# - Tope de admitidos por capacidad de G1
+# - Gráfico de Facturación + Rentabilidad (eje secundario)
+# - KPIs en OPEX & Resultados
 # requirements.txt: streamlit, numpy, pandas, altair
 
 import streamlit as st
@@ -12,7 +16,6 @@ st.title("Modelo de Dinámica de Sistemas — Colegio")
 
 # --- Migración/compatibilidad de parámetros ---
 def ensure_params_defaults(p):
-    """Completa atributos faltantes con defaults de la clase Params actual."""
     defaults = Params()
     for k, v in defaults.__dict__.items():
         if not hasattr(p, k):
@@ -57,11 +60,11 @@ def sidebar_marketing_y_admision(p: Params):
 
     st.sidebar.header("Selección (admisión)")
     p.politica_seleccion = st.sidebar.slider("Política de selección (% aceptados del stock)", 0.0, 1.0, p.politica_seleccion, 0.01)
-    p.alumnos_admitidos_objetivo = st.sidebar.number_input("Alumnos admitidos (objetivo anual)", 0, 10000, p.alumnos_admitidos_objetivo)
 
 def sidebar_costos_inversion_y_calidad(p: Params):
     st.sidebar.header("Costos e inversión (impacto en calidad)")
-    p.pct_sueldos = st.sidebar.slider("% Sueldos sobre facturación", 0.0, 0.95, p.pct_sueldos, 0.01)
+    p.costo_docente_por_aula = st.sidebar.number_input("Costo docente por AULA ($/año)", 0.0, 2_000_000.0, p.costo_docente_por_aula, 1_000.0)
+    p.sueldos_no_docentes = st.sidebar.number_input("Sueldos NO docentes ($/año)", 0.0, 10_000_000.0, p.sueldos_no_docentes, 1_000.0)
     p.inversion_infra_anual = st.sidebar.number_input("Inversión en infraestructura ($/año)", 0.0, 10_000_000.0, p.inversion_infra_anual, 10_000.0)
     p.inversion_calidad_por_alumno = st.sidebar.number_input("Inversión en calidad por alumno ($/año)", 0.0, 20_000.0, p.inversion_calidad_por_alumno, 10.0)
     p.mantenimiento_pct_facturacion = st.sidebar.slider("% Mantenimiento sobre facturación", 0.0, 0.5, p.mantenimiento_pct_facturacion, 0.01)
@@ -80,11 +83,6 @@ def sidebar_financiamiento_y_pipeline(p: Params, key_prefix: str = "fin"):
         "CAPEX por aula nueva ($)",
         min_value=0.0, max_value=10_000_000.0, value=p.costo_construccion_aula, step=10_000.0,
         key=f"{key_prefix}_costo_construccion_aula"
-    )
-    p.costo_docente_por_aula_nueva = st.sidebar.number_input(
-        "Costo docente por aula NUEVA ($/año)",
-        min_value=0.0, max_value=2_000_000.0, value=p.costo_docente_por_aula_nueva, step=1_000.0,
-        key=f"{key_prefix}_costo_docente_por_aula_nueva"
     )
 
     st.sidebar.header("Financiamiento")
@@ -136,10 +134,11 @@ tab_inicio, tab_sim, tab_mkt, tab_costos, tab_fin, tab_coh, tab_exp, tab_export 
 with tab_inicio:
     st.markdown("""
 **Novedades del modelo:**
-- **Candidatos**: entradas = *NuevosCandidatos*; salidas = **Admitidos** (a G1) y **Rechazados** (salen del sistema).
-- **Demanda**: decrece **5% anual** (editable) y limita el crecimiento.
-- **Caja** y **Deuda** como **stocks**. **CAPEX** se divide en **Propio** y **Financiado** con **Intereses** y **Amortización**.
-- **Promoción**: flujo interno G(i−1) → G(i) (pipeline educativo).
+- **Sueldos** = *costo docente por aula × #aulas* + *sueldos no-docentes*.  
+- Se eliminan **Docente por aula nueva** y **Admitidos objetivo**.
+- **Admitidos** limitados por la **capacidad de 1º grado** (divisiones × cupo máx).
+- **Deuda** crece cada año del pipeline con el **CAPEX financiado** del año; se pagan **intereses** y **amortización** sobre el **saldo**.
+- Gráfico de **Facturación + Rentabilidad** y **KPIs** en OPEX/Resultados.
     """)
 
 # --------- Simulación (vista principal) ---------
@@ -208,11 +207,35 @@ with tab_costos:
     p = st.session_state.params
     df, _ = simulate(p)
 
-    st.subheader("Facturación")
-    st.line_chart(df, x="Año", y="Facturacion", use_container_width=True)
+    # KPIs (último año)
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    last = df.iloc[-1]
+    with k1: st.metric("Facturación (fin)", f"${last['Facturacion']:,.0f}")
+    with k2: st.metric("OPEX (fin)", f"${last['CostosOPEX']:,.0f}")
+    with k3: st.metric("Resultado Operativo (fin)", f"${last['ResultadoOperativo']:,.0f}")
+    with k4: st.metric("Resultado Neto (fin)", f"${last['ResultadoNeto']:,.0f}")
+    with k5: st.metric("Margen Neto (fin)", f"{last['MargenNeto']*100:.1f}%")
+    with k6: st.metric("Deuda (fin)", f"${last['Deuda']:,.0f}")
+
+    st.subheader("Facturación + Rentabilidad")
+    # Capa 1: barras de facturación
+    bars = alt.Chart(df).mark_bar(opacity=0.7).encode(
+        x="Año:Q",
+        y=alt.Y("Facturacion:Q", title="Facturación ($/año)"),
+        tooltip=["Año","Facturacion"]
+    )
+    # Capa 2: línea de Margen Neto (%) con eje secundario
+    line = alt.Chart(df).mark_line(point=True).encode(
+        x="Año:Q",
+        y=alt.Y("MargenNeto:Q", axis=alt.Axis(title="Margen Neto (%)", format="%")),
+        color=alt.value("#1f77b4"),
+        tooltip=[alt.Tooltip("Año:Q"), alt.Tooltip("MargenNeto:Q", format=".1%")]
+    )
+    chart = alt.layer(bars, line).resolve_scale(y='independent')
+    st.altair_chart(chart, use_container_width=True)
 
     st.subheader("Composición OPEX (stacked)")
-    opex_all = ["Sueldos","InversionInfra","InversionCalidadAlumno","Mantenimiento","Marketing","DocentesNuevas"]
+    opex_all = ["Sueldos","InversionInfra","InversionCalidadAlumno","Mantenimiento","Marketing"]
     opex_sel = choose_series("Partidas OPEX", opex_all, opex_all, key="opex_parts")
     if opex_sel:
         opex_long = fold(df, opex_sel)
