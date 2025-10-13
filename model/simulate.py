@@ -14,7 +14,7 @@ class Params:
 
     # Calidad y dinámica (hacinamiento afecta calidad)
     calidad_base: float = 0.75
-    beta_hacinamiento: float = 0.8
+    beta_hacinamiento: float = 2.0  # ↑ penalización por sobre-óptimo
 
     # Bajas
     tasa_bajas_imprevistas: float = 0.01
@@ -35,8 +35,8 @@ class Params:
     cac_base: float = 800.0
     k_saturacion: float = 2.0
 
-    # Admisión (valor absoluto deseado por año)
-    admitidos_deseados: int = 300
+    # Admisión (porcentaje de candidatos aceptados)
+    politica_seleccion: float = 0.50  # 0..1
 
     # Finanzas (ingresos y costos operativos)
     cuota_mensual: float = 500.0
@@ -68,12 +68,12 @@ class Params:
 
     # Iniciales académicos
     g_inicial: int = 50
-    candidatos_inicial: float = 100.0  # (solo para compatibilidad de salida)
+    candidatos_inicial: float = 100.0  # (solo reporte)
 
-    # Sensibilidades de calidad
-    k_q_inv_alumno: float = 0.20
-    k_q_infra_inversion: float = 0.15
-    k_q_mantenimiento_netodep: float = 0.20
+    # Sensibilidades de calidad (ajustadas para no saturar en 1)
+    k_q_inv_alumno: float = 0.12
+    k_q_infra_inversion: float = 0.10
+    k_q_mantenimiento_netodep: float = 0.10
     k_q_selectividad: float = 0.20  # resta calidad si admitidos/nuevos es alto
 
     # Normalizadores
@@ -81,7 +81,7 @@ class Params:
     ref_infra: float = 200_000.0
     ref_mant: float = 100_000.0
 
-    # NUEVO: candidatos orgánicos por calidad (parámetros fijos razonables)
+    # Candidatos orgánicos por calidad (parámetros razonables)
     qref_candidatos: float = 0.60      # umbral de calidad para activar orgánicos
     alpha_candidatos_q: float = 0.30   # cands por alumno por punto de calidad (>qref)
     lag_calidad_candidatos: int = 1    # usar calidad(t-1)
@@ -99,7 +99,7 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     # Stocks
     Gk = np.zeros((T+1, G), dtype=float)   # alumnos por grado
     Div = np.zeros((T+1, G), dtype=float)  # divisiones por grado
-    Cand = np.zeros(T+1, dtype=float)      # (salida/compat)
+    Cand = np.zeros(T+1, dtype=float)      # (reporte)
     Act = np.zeros(T+1, dtype=float)       # activos
     Caja = np.zeros(T+1, dtype=float)      # caja
     Deuda = np.zeros(T+1, dtype=float)     # deuda
@@ -135,8 +135,8 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     # Marketing y candidatos (flujos)
     cac = np.zeros(T+1)
     nuevos_candidatos = np.zeros(T+1)
-    nuevos_candidatos_mkt = np.zeros(T+1)  # NUEVO
-    nuevos_candidatos_q = np.zeros(T+1)    # NUEVO orgánicos
+    nuevos_candidatos_mkt = np.zeros(T+1)
+    nuevos_candidatos_q = np.zeros(T+1)
     admitidos = np.zeros(T+1)
     rechazados = np.zeros(T+1)
     selectividad = np.zeros(T+1)
@@ -169,10 +169,11 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         Cap_opt_k = cap_opt(Div[k, :])
         aulas_k = float(Div[k, :].sum())
 
-        # Hacinamiento (para calidad) vs óptimo
+        # Hacinamiento (penaliza cuando Gk > Cap_opt por grado)
         with np.errstate(divide='ignore', invalid='ignore'):
             hac_k = np.maximum(0.0, (Gk[k, :] - Cap_opt_k) / np.maximum(Cap_opt_k, 1.0))
-        hac_prom = 0.0 if alumnos_k <= 0 else float(np.dot(Gk[k, :], hac_k) / alumnos_k)
+        # promedio ponderado por alumnos
+        hac_prom = 0.0 if alumnos_k <= 0 else float(np.dot(Gk[k, :], hac_k) / max(alumnos_k, 1.0))
 
         # Facturación
         facturacion[k] = alumnos_k * par.cuota_mensual * par.meses
@@ -202,32 +203,23 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
             else:
                 inv_infra[k] = inv_calidad_alumno[k] = marketing[k] = 0.0
 
-        # Nuevos candidatos (suma de marketing + efecto calidad)
-        # 1) pagados por mkt
+        # Nuevos candidatos (marketing + orgánicos por calidad)
         nuevos_candidatos_mkt[k] = 0.0 if cac[k] <= 0 else marketing[k] / cac[k]
-
-        # 2) orgánicos por calidad percibida (con lag y saturación por pool)
         q_driver = calidad[k-1] if (k > 0 and par.lag_calidad_candidatos >= 1) else calidad[k]
         excedente_q = max(q_driver - par.qref_candidatos, 0.0)
         pool_satur = 0.0
         if Demanda[k] > 1e-9:
             pool_satur = max(0.0, 1.0 - (alumnos_k / Demanda[k]))  # 0..1
         nuevos_candidatos_q[k] = par.alpha_candidatos_q * excedente_q * alumnos_k * pool_satur
-
         nuevos_candidatos[k] = nuevos_candidatos_mkt[k] + nuevos_candidatos_q[k]
 
-        # Admitidos: valor absoluto deseado, limitado por nuevos candidatos, demanda y capacidad de G1
+        # Admitidos: % sobre candidatos, limitado por demanda y capacidad G1
         gap_demanda = max(Demanda[k] - alumnos_k, 0.0)
         capacidad_g1_max = float(Div[k, 0] * par.cupo_maximo)
-        admitidos[k] = min(float(par.admitidos_deseados), nuevos_candidatos[k], gap_demanda, capacidad_g1_max)
+        admitidos[k] = min(par.politica_seleccion * nuevos_candidatos[k], gap_demanda, capacidad_g1_max)
 
-        # Rechazados: lo que no se admite se pierde
         rechazados[k] = max(nuevos_candidatos[k] - admitidos[k], 0.0)
-
-        # Reporte "stock" como los candidatos del año
         Cand[k] = nuevos_candidatos[k]
-
-        # Selectividad del año
         selectividad[k] = float(admitidos[k] / nuevos_candidatos[k]) if nuevos_candidatos[k] > 0 else 0.0
 
         # Bajas aleatorias SOLO en G3..G10 (con presión de precio)
@@ -252,7 +244,7 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         # Egresados(t) = G12(t)
         egresados[k] = Gk[k, 11]
 
-        # Calidad (con inversiones realizadas, mantenimiento vs depreciación y selectividad)
+        # Calidad (inversión + mantenimiento vs depreciación + selectividad − hacinamiento)
         dep = par.tasa_depreciacion_anual * Act[k]
         inv_alum_norm = ((inv_calidad_alumno[k] / max(alumnos_k, 1e-9)) / max(par.ref_inv_alumno, 1e-9)) if alumnos_k > 0 else 0.0
         infra_norm = (inv_infra[k] / max(par.ref_infra, 1e-9))
@@ -388,10 +380,10 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         "MargenOperativo": margen_operativo,
         "MargenNeto": margen_neto,
         "CAC": cac,
-        "CandidatosStock": rint(Cand),             # reporta los candidatos del año
+        "CandidatosStock": rint(Cand),             # candidatos del año
         "NuevosCandidatos": rint(nuevos_candidatos),
-        "NuevosCandidatosMkt": rint(nuevos_candidatos_mkt),  # NUEVO
-        "NuevosCandidatosQ": rint(nuevos_candidatos_q),      # NUEVO
+        "NuevosCandidatosMkt": rint(nuevos_candidatos_mkt),
+        "NuevosCandidatosQ": rint(nuevos_candidatos_q),
         "Admitidos": rint(admitidos),
         "Rechazados": rint(rechazados),
         "Selectividad": selectividad,              # 0..1
