@@ -261,7 +261,8 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
             # 7) Caja (flujo de resultado neto)
             next_Caja = Caja[k] + resultado_neto[k]
 
-            # 8) Demanda ya se actualizó arriba
+            # 8) Demanda del próximo paso
+            next_Demanda = Demanda[k] * (1.0 - par.tasa_descenso_demanda)
 
             # Avances
             Gk[k+1, :] = np.maximum(0.0, next_G)
@@ -270,7 +271,7 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
             Act[k+1] = max(next_Act, 0.0)
             Deuda[k+1] = next_Deuda
             Caja[k+1] = next_Caja
-            Demanda[k+1] = Demanda[k] * (1.0 - par.tasa_descenso_demanda)
+            Demanda[k+1] = next_Demanda
         else:
             # último año: cerrar resultado neto (sin pipeline)
             capex_total[k] = 0.0
