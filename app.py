@@ -34,7 +34,7 @@ def sidebar_basicos_y_demanda(p: Params):
 
     st.sidebar.header("Calidad y bajas (base)")
     p.calidad_base = st.sidebar.slider("Calidad base", 0.0, 1.0, p.calidad_base, 0.01)
-    p.beta_hacinamiento = st.sidebar.slider("β hacinamiento → calidad", 0.0, 2.0, p.beta_hacinamiento, 0.05)
+    p.beta_hacinamiento = st.sidebar.slider("β hacinamiento → calidad", 0.0, 3.0, p.beta_hacinamiento, 0.05)
     p.tasa_bajas_imprevistas = st.sidebar.slider("Tasa bajas imprevistas (/año)", 0.0, 0.2, p.tasa_bajas_imprevistas, 0.005)
     p.tasa_bajas_max_por_calidad = st.sidebar.slider("Tasa máx. bajas por mala calidad", 0.0, 0.5, p.tasa_bajas_max_por_calidad, 0.01)
 
@@ -47,7 +47,7 @@ def sidebar_marketing_y_costos(p: Params):
     p.k_saturacion = st.sidebar.slider("Sensibilidad CAC a saturación", 0.0, 5.0, p.k_saturacion, 0.1)
 
     st.sidebar.divider()
-    p.admitidos_deseados = st.sidebar.number_input("Admitidos deseados (alumnos/año)", 0, 100000, p.admitidos_deseados, 10)
+    p.politica_seleccion = st.sidebar.slider("Política de admisiones (% aceptados)", 0.0, 1.0, p.politica_seleccion, 0.01)
 
     st.sidebar.header("Costos e inversión")
     p.costo_docente_por_aula = st.sidebar.number_input("Costo docente por AULA ($/año)", 0.0, 2_000_000.0, p.costo_docente_por_aula, 1_000.0)
@@ -87,9 +87,9 @@ tab_inicio, tab_sim, tab_mkt, tab_costos, tab_fin, tab_coh, tab_exp, tab_export 
 
 with tab_inicio:
     st.markdown("""
-- **Candidatos orgánicos**: si la **calidad** supera un umbral y aún hay **pool** de demanda, llegan candidatos extra (boca a boca) sin costo de CAC.
-- **Selectividad** = Admitidos/NuevosCandidatos. Si es alta, baja la **calidad** futura.
-- **Admitidos(t)** afectan **G1(t+1)** → impactan **AlumnosTotales** desde el año siguiente.
+- **Hacinamiento** ahora penaliza más la **calidad** al superar el **cupo óptimo** por curso.
+- **Política de admisiones** controla el **% de candidatos aceptados** (limitado por demanda y capacidad de G1).
+- **Candidatos orgánicos**: si la **calidad** supera un umbral y hay **pool** de demanda, llegan candidatos extra (boca a boca).
     """)
 
 with tab_sim:
@@ -123,7 +123,7 @@ with tab_mkt:
     df = df_base
     c1, c2 = st.columns(2)
     with c1:
-        st.subheader("Candidatos: Pagados vs Orgánicos")
+        st.subheader("Candidatos: Totales, Pagados y Orgánicos")
         cand_all = ["NuevosCandidatos","NuevosCandidatosMkt","NuevosCandidatosQ"]
         cand_sel = choose_series("Series (Candidatos)", cand_all, ["NuevosCandidatos","NuevosCandidatosMkt","NuevosCandidatosQ"], key="mkt_cands")
         if cand_sel:
