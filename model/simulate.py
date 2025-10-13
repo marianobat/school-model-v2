@@ -328,7 +328,7 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         df[f"G{gi+1}"] = rint(Gk[:, gi])
         df[f"DivG{gi+1}"] = Div[:, gi]
         Cap_opt_series = Div[:, gi] * par.cupo_optimo
-        with np.errstate(divide='ignore', invalid='invalid'):
+        with np.errstate(divide='ignore', invalid='ignore'):
             hac_series = np.maximum(0.0, (Gk[:, gi] - Cap_opt_series) / np.maximum(Cap_opt_series, 1.0))
         df[f"HacG{gi+1}"] = hac_series
 
