@@ -8,8 +8,9 @@ class Params:
     # Horizonte
     years: int = 20
 
-    # Mercado / demanda
-    demanda_potencial: int = 6000
+    # Mercado / Demanda
+    demanda_potencial_inicial: int = 6000
+    tasa_descenso_demanda: float = 0.05  # 5% anual
 
     # Calidad y dinámica (hacinamiento afecta calidad)
     calidad_base: float = 0.75
@@ -22,7 +23,7 @@ class Params:
     # Capacidad (12 grados)
     div_inicial_por_grado: int = 2
     cupo_optimo: int = 25    # óptimo para calidad
-    cupo_maximo: int = 30    # límite físico (para referencia/visual; no topea admitidos)
+    cupo_maximo: int = 30    # límite físico (capacidad dura)
 
     # Marketing & selección con STOCK de candidatos
     prop_mkt: float = 0.10
@@ -32,7 +33,7 @@ class Params:
     politica_seleccion: float = 0.50   # % de candidatos del stock que pasan el filtro
     alumnos_admitidos_objetivo: int = 300  # objetivo anual de admisión
 
-    # Finanzas
+    # Finanzas (ingresos y costos operativos)
     cuota_mensual: float = 500.0
     meses: int = 12
     pct_sueldos: float = 0.60
@@ -48,7 +49,14 @@ class Params:
     pipeline_start_year: int = -1  # -1 desactivado; >=0 año de inicio
     costo_construccion_aula: float = 100_000.0
 
-    # Iniciales de stocks
+    # Financiamiento / caja / deuda
+    caja_inicial: float = 500_000.0
+    pct_capex_financiado: float = 0.60     # % del CAPEX financiado con deuda
+    tasa_interes_deuda: float = 0.12       # interés anual simple sobre saldo
+    anos_amortizacion_deuda: int = 10      # amortización lineal
+    deuda_inicial: float = 0.0
+
+    # Iniciales de stocks académicos
     g_inicial: int = 50                   # alumnos por grado inicial
     candidatos_inicial: float = 100.0     # stock de candidatos inicial
 
@@ -65,20 +73,25 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     G = 12
     t = np.arange(T+1)
 
-    # Stocks
+    # Stocks por tiempo
     Gk = np.zeros((T+1, G), dtype=float)   # alumnos por grado
     Div = np.zeros((T+1, G), dtype=float)  # divisiones por grado
     Cand = np.zeros(T+1, dtype=float)      # candidatos
     Act = np.zeros(T+1, dtype=float)       # activos (para depreciación)
+    Caja = np.zeros(T+1, dtype=float)      # caja/colchón financiero
+    Deuda = np.zeros(T+1, dtype=float)     # deuda financiera
+    Demanda = np.zeros(T+1, dtype=float)   # demanda potencial que decae
 
     # Iniciales
     Gk[0, :] = par.g_inicial
     Div[0, :] = par.div_inicial_por_grado
     Cand[0] = par.candidatos_inicial
     Act[0] = par.activos_inicial
+    Caja[0] = par.caja_inicial
+    Deuda[0] = par.deuda_inicial
+    Demanda[0] = par.demanda_potencial_inicial
 
     # Series agregadas
-    alumnos = np.zeros(T+1)
     calidad = np.zeros(T+1)
     facturacion = np.zeros(T+1)
     sueldos = np.zeros(T+1)
@@ -88,16 +101,22 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     docentes_nuevas = np.zeros(T+1)
     marketing = np.zeros(T+1)
     costos_opex = np.zeros(T+1)
+
     resultado_operativo = np.zeros(T+1)
-    capex = np.zeros(T+1)
+    capex_total = np.zeros(T+1)
+    capex_propio = np.zeros(T+1)
+    capex_financiado = np.zeros(T+1)
+    interes_deuda = np.zeros(T+1)
+    amortizacion_deuda = np.zeros(T+1)
     resultado_neto = np.zeros(T+1)
 
     # Marketing y candidatos
     cac = np.zeros(T+1)
     nuevos_candidatos = np.zeros(T+1)
-    admitidos = np.zeros(T+1)  # (antes "seleccionados"): ingresantes reales
+    admitidos = np.zeros(T+1)     # ingresantes reales a G1
+    rechazados = np.zeros(T+1)    # candidatos no admitidos (limpian el stock)
 
-    # Flujos de salida
+    # Flujos de salida académicos
     bajas_totales = np.zeros(T+1)
     egresados = np.zeros(T+1)  # = G12 del año anterior
 
@@ -116,36 +135,41 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         return (0 <= (k - par.pipeline_start_year) < 12)
 
     for k in range(T+1):
+        # Demanda decreciente
+        if k > 0:
+            Demanda[k] = Demanda[k-1] * (1.0 - par.tasa_descenso_demanda)
+
         # Totales y capacidades
-        alumnos[k] = Gk[k, :].sum()
+        alumnos_k = Gk[k, :].sum()
         Cap_opt_k = cap_opt(Div[k, :])
         Cap_max_k = cap_max(Div[k, :])
-        Cap_total_max = Cap_max_k.sum()
 
         # Hacinamiento (para calidad) vs óptimo
         with np.errstate(divide='ignore', invalid='ignore'):
             hac_k = np.maximum(0.0, (Gk[k, :] - Cap_opt_k) / np.maximum(Cap_opt_k, 1.0))
-        hac_prom = 0.0 if alumnos[k] <= 0 else float(np.dot(Gk[k, :], hac_k) / alumnos[k])
+        hac_prom = 0.0 if alumnos_k <= 0 else float(np.dot(Gk[k, :], hac_k) / alumnos_k)
 
         # Facturación y costos base
-        facturacion[k] = alumnos[k] * par.cuota_mensual * par.meses
+        facturacion[k] = alumnos_k * par.cuota_mensual * par.meses
         sueldos[k] = par.pct_sueldos * facturacion[k]
         inv_infra[k] = par.inversion_infra_anual
-        inv_calidad_alumno[k] = par.inversion_calidad_por_alumno * alumnos[k]
+        inv_calidad_alumno[k] = par.inversion_calidad_por_alumno * alumnos_k
         mantenimiento[k] = par.mantenimiento_pct_facturacion * facturacion[k]
 
         # Marketing (budget) y CAC
-        saturacion = 0.0 if par.demanda_potencial <= 0 else min(1.0, alumnos[k] / par.demanda_potencial)
+        saturacion = 0.0 if Demanda[k] <= 0 else min(1.0, alumnos_k / Demanda[k])
         margen_prov = facturacion[k] - (sueldos[k] + inv_calidad_alumno[k] + inv_infra[k] + mantenimiento[k])
         marketing[k] = max(par.mkt_floor, par.mkt_floor + par.prop_mkt * max(margen_prov, 0.0))
         cac[k] = par.cac_base * (1.0 + par.k_saturacion * saturacion)
         nuevos_candidatos[k] = 0.0 if cac[k] <= 0 else marketing[k] / cac[k]
 
-        # Admitidos (ingresantes reales): gobernados por objetivo y política vs stock y demanda (NO por capacidad)
-        gap_demanda = max(par.demanda_potencial - alumnos[k], 0.0)
-        cuota = par.alumnos_admitidos_objetivo
-        adm_teor = min(cuota, par.politica_seleccion * Cand[k])
+        # Admitidos (ingresantes reales): objetivo y política, limitados por demanda (no por capacidad)
+        gap_demanda = max(Demanda[k] - alumnos_k, 0.0)
+        adm_teor = min(par.alumnos_admitidos_objetivo, par.politica_seleccion * Cand[k])
         admitidos[k] = min(adm_teor, gap_demanda)
+
+        # Rechazados: limpian el stock de candidatos (salen del sistema)
+        rechazados[k] = max(Cand[k] - admitidos[k], 0.0)
 
         # Bajas (usa calidad del período anterior para evitar simultaneidad)
         calidad_prev = calidad[k-1] if k > 0 else par.calidad_base
@@ -176,17 +200,30 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         if k < T:
             # Pipeline
             build = construir_en_anio(k)
-            capex[k] = par.costo_construccion_aula if build else 0.0
+            capex_total[k] = par.costo_construccion_aula if build else 0.0
             docentes_nuevas[k] = par.costo_docente_por_aula_nueva if build else 0.0
 
             # OPEX final (sumando docentes de aulas nuevas)
             costos_opex[k] += docentes_nuevas[k]
             resultado_operativo[k] = facturacion[k] - costos_opex[k]
-            resultado_neto[k] = resultado_operativo[k] - capex[k]
 
-            # Stocks:
+            # Financiamiento del CAPEX
+            capex_financiado[k] = capex_total[k] * par.pct_capex_financiado
+            capex_propio[k] = capex_total[k] - capex_financiado[k]
+
+            # Intereses y amortización
+            interes_deuda[k] = par.tasa_interes_deuda * Deuda[k]
+            if par.anos_amortizacion_deuda > 0:
+                amortizacion_deuda[k] = min(Deuda[k], Deuda[k] / par.anos_amortizacion_deuda)
+            else:
+                amortizacion_deuda[k] = Deuda[k]  # amortiza todo si años=0
+
+            # Resultado neto (flujo caja): op - capex propio - intereses - amortización
+            resultado_neto[k] = resultado_operativo[k] - capex_propio[k] - interes_deuda[k] - amortizacion_deuda[k]
+
+            # Evolución de stocks:
             # 1) Candidatos
-            next_C = max(Cand[k] + nuevos_candidatos[k] - admitidos[k], 0.0)
+            next_C = max(Cand[k] + nuevos_candidatos[k] - admitidos[k] - rechazados[k], 0.0)
 
             # 2) Alumnos por grado
             next_G = np.zeros(G, dtype=float)
@@ -206,19 +243,45 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
                 next_D[tramo] += 1.0
                 pipeline_construcciones[k] = 1.0
 
-            # 4) Activos (capex suma; inversión_infra es OPEX)
-            next_Act = Act[k] + capex[k] - dep
+            # 4) Capacidad/Población — límite duro del stock
+            total_next = float(next_G.sum())
+            cap_total_max_next = float((next_D * par.cupo_maximo).sum())
+            poblacion_max = float(Demanda[k])  # población disponible ese año
+            allowed = min(cap_total_max_next, poblacion_max)
+            if total_next > allowed and total_next > 0:
+                factor = allowed / total_next
+                next_G = next_G * factor
+
+            # 5) Activos (capex suma; inversión_infra es OPEX)
+            next_Act = Act[k] + capex_total[k] - dep
+
+            # 6) Deuda (entra capex financiado; salen amortizaciones)
+            next_Deuda = max(Deuda[k] + capex_financiado[k] - amortizacion_deuda[k], 0.0)
+
+            # 7) Caja (flujo de resultado neto)
+            next_Caja = Caja[k] + resultado_neto[k]
+
+            # 8) Demanda ya se actualizó arriba
 
             # Avances
             Gk[k+1, :] = np.maximum(0.0, next_G)
             Div[k+1, :] = next_D
             Cand[k+1] = next_C
             Act[k+1] = max(next_Act, 0.0)
+            Deuda[k+1] = next_Deuda
+            Caja[k+1] = next_Caja
+            Demanda[k+1] = Demanda[k] * (1.0 - par.tasa_descenso_demanda)
         else:
-            capex[k] = 0.0
-            docentes_nuevas[k] = 0.0
-            resultado_neto[k] = resultado_operativo[k]
+            # último año: cerrar resultado neto (sin pipeline)
+            capex_total[k] = 0.0
+            capex_financiado[k] = 0.0
+            capex_propio[k] = 0.0
+            interes_deuda[k] = par.tasa_interes_deuda * Deuda[k]
+            amortizacion_deuda[k] = min(Deuda[k], Deuda[k] / par.anos_amortizacion_deuda) if par.anos_amortizacion_deuda > 0 else Deuda[k]
+            resultado_neto[k] = resultado_operativo[k] - interes_deuda[k] - amortizacion_deuda[k]
+            # stocks no avanzan
 
+    # Totales aulas
     aulas = Div.sum(axis=1)
 
     # Redondeo de presentación
@@ -226,6 +289,7 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
 
     df = pd.DataFrame({
         "Año": t,
+        "DemandaPotencial": Demanda,
         "AlumnosTotales": rint(Gk.sum(axis=1)),
         "Calidad": calidad,
         "AulasTotales": rint(aulas),
@@ -240,12 +304,19 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         "Marketing": marketing,
         "CostosOPEX": sueldos + inv_infra + inv_calidad_alumno + mantenimiento + marketing + docentes_nuevas,
         "ResultadoOperativo": resultado_operativo,
-        "CAPEX": capex,
+        "CAPEX_Total": capex_total,
+        "CAPEX_Propio": capex_propio,
+        "CAPEX_Financiado": capex_financiado,
+        "InteresDeuda": interes_deuda,
+        "AmortizacionDeuda": amortizacion_deuda,
         "ResultadoNeto": resultado_neto,
+        "Caja": Caja,
+        "Deuda": Deuda,
         "CAC": cac,
         "CandidatosStock": rint(Cand),
         "NuevosCandidatos": rint(nuevos_candidatos),
         "Admitidos": rint(admitidos),
+        "Rechazados": rint(rechazados),
         "BajasTotales": rint(bajas_totales),
         "Egresados": rint(egresados),
         "PipelineConstrucciones": pipeline_construcciones,
@@ -257,7 +328,7 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         df[f"G{gi+1}"] = rint(Gk[:, gi])
         df[f"DivG{gi+1}"] = Div[:, gi]
         Cap_opt_series = Div[:, gi] * par.cupo_optimo
-        with np.errstate(divide='ignore', invalid='ignore'):
+        with np.errstate(divide='ignore', invalid='invalid'):
             hac_series = np.maximum(0.0, (Gk[:, gi] - Cap_opt_series) / np.maximum(Cap_opt_series, 1.0))
         df[f"HacG{gi+1}"] = hac_series
 
