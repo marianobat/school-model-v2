@@ -1,9 +1,3 @@
-# app.py — Unifica controles en el sidebar y simula una sola vez.
-# - Los controles de "básicos/demanda" y "marketing/costos" se crean SOLO una vez.
-# - Se calcula df_base una vez y se usa en todas las pestañas (salvo Expansión, que re-simula localmente).
-# - Esto asegura que cambios de marketing afecten Admitidos y que "AlumnosTotales" en Simulación lo refleje.
-# requirements.txt: streamlit, numpy, pandas, altair
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -21,13 +15,12 @@ def ensure_params_defaults(p):
             setattr(p, k, v)
     return p
 
-# --------- Estado ---------
 if "params" not in st.session_state:
     st.session_state.params = Params()
 else:
     st.session_state.params = ensure_params_defaults(st.session_state.params)
 
-# --------- Sidebar (UNA sola vez) ---------
+# --------- Sidebar (único lugar de edición) ---------
 def sidebar_basicos_y_demanda(p: Params):
     st.sidebar.header("Horizonte y Demanda")
     p.years = st.sidebar.slider("Años de simulación", 5, 50, p.years)
@@ -39,25 +32,24 @@ def sidebar_basicos_y_demanda(p: Params):
     p.cupo_optimo = st.sidebar.number_input("Cupo ÓPTIMO por aula (calidad)", 10, 60, p.cupo_optimo)
     p.cupo_maximo = st.sidebar.number_input("Cupo MÁXIMO por aula (capacidad dura)", 10, 80, p.cupo_maximo)
 
-    st.sidebar.header("Calidad y bajas")
+    st.sidebar.header("Calidad y bajas (base)")
     p.calidad_base = st.sidebar.slider("Calidad base", 0.0, 1.0, p.calidad_base, 0.01)
     p.beta_hacinamiento = st.sidebar.slider("β hacinamiento → calidad", 0.0, 2.0, p.beta_hacinamiento, 0.05)
     p.tasa_bajas_imprevistas = st.sidebar.slider("Tasa bajas imprevistas (/año)", 0.0, 0.2, p.tasa_bajas_imprevistas, 0.005)
     p.tasa_bajas_max_por_calidad = st.sidebar.slider("Tasa máx. bajas por mala calidad", 0.0, 0.5, p.tasa_bajas_max_por_calidad, 0.01)
 
-    st.sidebar.header("Iniciales académicos")
-    p.g_inicial = st.sidebar.number_input("Alumnos por grado (inicial)", 0, 200, p.g_inicial)
-    p.candidatos_inicial = st.sidebar.number_input("Candidatos (stock inicial)", 0, 200000, int(p.candidatos_inicial))
-
 def sidebar_marketing_y_costos(p: Params):
-    st.sidebar.header("Cuotas y Marketing")
+    st.sidebar.header("Cuotas, Marketing e Inversiones")
     p.cuota_mensual = st.sidebar.number_input("Cuota mensual ($/est/mes)", 0.0, 100000.0, p.cuota_mensual, 10.0)
     p.prop_mkt = st.sidebar.slider("Proporción resultado → marketing", 0.0, 0.9, p.prop_mkt, 0.01)
     p.mkt_floor = st.sidebar.number_input("Piso anual de marketing ($)", 0.0, 10_000_000.0, p.mkt_floor, 1_000.0)
     p.cac_base = st.sidebar.number_input("CAC base ($/candidato)", 1.0, 500_000.0, p.cac_base, 10.0)
     p.k_saturacion = st.sidebar.slider("Sensibilidad CAC a saturación", 0.0, 5.0, p.k_saturacion, 0.1)
 
-    st.sidebar.header("Costos e inversión (impacto en calidad)")
+    st.sidebar.divider()
+    p.admitidos_deseados = st.sidebar.number_input("Admitidos deseados (alumnos/año)", 0, 100000, p.admitidos_deseados, 10)
+
+    st.sidebar.header("Costos e inversión")
     p.costo_docente_por_aula = st.sidebar.number_input("Costo docente por AULA ($/año)", 0.0, 2_000_000.0, p.costo_docente_por_aula, 1_000.0)
     p.sueldos_no_docentes = st.sidebar.number_input("Sueldos NO docentes ($/año)", 0.0, 10_000_000.0, p.sueldos_no_docentes, 1_000.0)
     p.inversion_infra_anual = st.sidebar.number_input("Inversión en infraestructura (target $/año)", 0.0, 10_000_000.0, p.inversion_infra_anual, 10_000.0)
@@ -67,11 +59,11 @@ def sidebar_marketing_y_costos(p: Params):
 sidebar_basicos_y_demanda(st.session_state.params)
 sidebar_marketing_y_costos(st.session_state.params)
 
-# --- Simulación base UNA vez (con todos los parámetros del sidebar) ---
+# --- Simulación base una vez ---
 p = st.session_state.params
 df_base, _ = simulate(p)
 
-# --------- Utilidades de gráfico ---------
+# --------- Gráficos helpers ---------
 def fold(df: pd.DataFrame, cols, x="Año"):
     return df[[x] + cols].melt(id_vars=[x], value_vars=cols, var_name="serie", value_name="valor")
 
@@ -93,13 +85,13 @@ tab_inicio, tab_sim, tab_mkt, tab_costos, tab_fin, tab_coh, tab_exp, tab_export 
     ["🏠 Inicio", "📊 Simulación", "📣 Marketing & Admisión", "💰 OPEX & Resultados", "🏦 Caja & Deuda", "📚 Cohortes", "🏗️ Expansión", "📥 Exportar"]
 )
 
-# --------- Inicio ---------
 with tab_inicio:
     st.markdown("""
-**Nota:** los **Admitidos(t)** impactan en **G1(t+1)** (modelo anual). Por eso, al subir marketing vas a ver el efecto en **AlumnosTotales** a partir del año siguiente.
+- **Candidatos orgánicos**: si la **calidad** supera un umbral y aún hay **pool** de demanda, llegan candidatos extra (boca a boca) sin costo de CAC.
+- **Selectividad** = Admitidos/NuevosCandidatos. Si es alta, baja la **calidad** futura.
+- **Admitidos(t)** afectan **G1(t+1)** → impactan **AlumnosTotales** desde el año siguiente.
     """)
 
-# --------- Simulación ---------
 with tab_sim:
     df = df_base
     c1, c2, c3 = st.columns(3)
@@ -127,13 +119,15 @@ with tab_sim:
     st.subheader("Calidad percibida")
     st.line_chart(df, x="Año", y="Calidad", use_container_width=True)
 
-# --------- Marketing & Admisión ---------
 with tab_mkt:
     df = df_base
     c1, c2 = st.columns(2)
     with c1:
-        st.subheader("Candidatos (stock)")
-        st.line_chart(df, x="Año", y="CandidatosStock", use_container_width=True)
+        st.subheader("Candidatos: Pagados vs Orgánicos")
+        cand_all = ["NuevosCandidatos","NuevosCandidatosMkt","NuevosCandidatosQ"]
+        cand_sel = choose_series("Series (Candidatos)", cand_all, ["NuevosCandidatos","NuevosCandidatosMkt","NuevosCandidatosQ"], key="mkt_cands")
+        if cand_sel:
+            st.altair_chart(alt_lines(fold(df, cand_sel), "Personas/año"), use_container_width=True)
 
         st.subheader("Funnel: Nuevos, Admitidos, Rechazados")
         fl_all = ["NuevosCandidatos","Admitidos","Rechazados"]
@@ -142,18 +136,18 @@ with tab_mkt:
             st.altair_chart(alt_lines(fold(df, fl_sel), "Personas/año"), use_container_width=True)
 
     with c2:
-        st.subheader("Marketing y CAC")
-        bc_all = ["Marketing","CAC"]
-        bc_sel = choose_series("Series (Budget/CAC)", bc_all, bc_all, key="mkt_bc")
-        if bc_sel:
-            st.altair_chart(alt_lines(fold(df, bc_sel), "Valor"), use_container_width=True)
+        st.subheader("Selectividad y CAC")
+        left = alt.layer(
+            alt.Chart(df).mark_line(point=True).encode(x="Año:Q", y=alt.Y("Selectividad:Q", title="Selectividad (0..1)")),
+            alt.Chart(df).mark_line(point=True).encode(x="Año:Q", y=alt.Y("CAC:Q", title="CAC ($/cand)"))
+        ).resolve_scale(y='independent')
+        st.altair_chart(left, use_container_width=True)
+
         st.subheader("Demanda potencial")
         st.line_chart(df, x="Año", y="DemandaPotencial", use_container_width=True)
 
-# --------- OPEX & Resultados ---------
 with tab_costos:
     df = df_base
-    # KPIs (último año)
     last = df.iloc[-1]
     k1, k2, k3, k4, k5, k6 = st.columns(6)
     with k1: st.metric("Facturación (fin)", f"${last['Facturacion']:,.0f}")
@@ -191,18 +185,17 @@ with tab_costos:
     ).interactive()
     st.altair_chart(stack_pct, use_container_width=True)
 
-# --------- Caja & Deuda ---------
 with tab_fin:
     df = df_base
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Caja y Deuda (stocks)")
-        st.altair_chart(alt_lines(fold(df, ["Caja","Deuda"]), "$"), use_container_width=True)
+        sel = ["Caja","Deuda"]
+        st.altair_chart(alt_lines(fold(df, sel), "$"), use_container_width=True)
     with c2:
         st.subheader("Intereses y Amortización (flujos)")
         st.altair_chart(alt_lines(fold(df, ["InteresDeuda","AmortizacionDeuda"]), "$/año"), use_container_width=True)
 
-# --------- Cohortes ---------
 with tab_coh:
     df = df_base
     st.subheader("Alumnos por grado (G1..G12)")
@@ -216,7 +209,7 @@ with tab_coh:
     ).properties(height=560)
     st.altair_chart(heat, use_container_width=True)
 
-# --------- Expansión / Pipeline ---------
+# Expansión (controles en esta pestaña y simulación local)
 def exp_controls_in_body(p: Params, key_prefix: str = "exp"):
     st.subheader("Parámetros de Expansión y Financiamiento")
     c1, c2, c3 = st.columns(3)
@@ -253,7 +246,6 @@ def exp_controls_in_body(p: Params, key_prefix: str = "exp"):
         )
 
 with tab_exp:
-    # Controles SOLO aquí y simulación local para esta pestaña:
     exp_controls_in_body(st.session_state.params, key_prefix="exp")
     p = st.session_state.params
     df = simulate(p)[0]
@@ -271,7 +263,6 @@ with tab_exp:
         )
         st.altair_chart(bar, use_container_width=True)
 
-# --------- Exportar ---------
 with tab_export:
     df, meta = df_base, {"params": st.session_state.params.__dict__}
     st.download_button(
