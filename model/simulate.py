@@ -68,10 +68,16 @@ class Params:
     ref_infra: float = 200_000.0
     ref_mant: float = 100_000.0
 
+    # Aleatoriedad
+    random_seed: int = 42  # para reproducibilidad en la asignación aleatoria de bajas G3..G10
+
 def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     T = par.years
     G = 12
     t = np.arange(T+1)
+
+    # RNG para reproducibilidad
+    rng = np.random.default_rng(par.random_seed)
 
     # Stocks por tiempo
     Gk = np.zeros((T+1, G), dtype=float)   # alumnos por grado
@@ -171,11 +177,25 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         # Rechazados: limpian el stock de candidatos (salen del sistema)
         rechazados[k] = max(Cand[k] - admitidos[k], 0.0)
 
-        # Bajas (usa calidad del período anterior para evitar simultaneidad)
+        # Bajas: SOLO entre G3..G10, asignadas ALEATORIAMENTE (multinomial) según la masa en esos grados
+        # Primero determinar la tasa global (depende de calidad del período previo)
         calidad_prev = calidad[k-1] if k > 0 else par.calidad_base
         tasa_bajas_total = min(1.0, par.tasa_bajas_imprevistas + (1.0 - calidad_prev) * par.tasa_bajas_max_por_calidad)
-        baj_k = tasa_bajas_total * Gk[k, :]
-        bajas_totales[k] = baj_k.sum()
+
+        bajas_vec = np.zeros(G, dtype=float)
+        # Índices Python: G3..G10 => 2..9
+        segmento = Gk[k, 2:10].copy()
+        total_segmento = float(segmento.sum())
+        if total_segmento > 0 and tasa_bajas_total > 0:
+            # cantidad objetivo de bajas en el segmento
+            bajas_obj = min(int(round(tasa_bajas_total * total_segmento)), int(total_segmento))
+            # probabilidades proporcionales al tamaño de cada grado (evita sacar más de lo que hay)
+            probs = segmento / total_segmento
+            # muestreo multinomial entero
+            bajas_seg_int = rng.multinomial(bajas_obj, probs)
+            bajas_vec[2:10] = bajas_seg_int
+        # En G1, G2, G11, G12 no aplicamos bajas aleatorias (quedan en 0)
+        bajas_totales[k] = float(bajas_vec.sum())
 
         # Egresados = alumnos de G12 del año anterior
         eg_prev = Gk[k-1, 11] if k > 0 else 0.0
@@ -226,14 +246,22 @@ def simulate(par: Params) -> Tuple[pd.DataFrame, Dict[str, Any]]:
             next_C = max(Cand[k] + nuevos_candidatos[k] - admitidos[k] - rechazados[k], 0.0)
 
             # 2) Alumnos por grado
+            #   - Entradas a G1: admitidos; bajas en G1 = 0 por diseño actual
             next_G = np.zeros(G, dtype=float)
-            # Entradas a G1: admitidos; salidas: bajas
-            next_G[0] = Gk[k, 0] + admitidos[k] - baj_k[0]
-            # Promoción k→k+1 (sin egresos intermedios), restando bajas locales
-            for gi in range(1, G):
-                promo = Gk[k, gi-1] - baj_k[gi-1]
-                next_G[gi] = Gk[k, gi] + promo - baj_k[gi]
-            # Egreso en 12º: restar egresados (del año anterior)
+            next_G[0] = Gk[k, 0] + admitidos[k]  # sin bajas en G1
+
+            #   - Promoción Gi-1 -> Gi para i=2..11 (G2..G11), con bajas sólo en G3..G10
+            #     Nota: en Python, índices 1..10 corresponden a G2..G11
+            for gi in range(1, 11):
+                promo = Gk[k, gi-1] - (bajas_vec[gi-1] if 2 <= gi-1 <= 9 else 0.0)
+                next_G[gi] = Gk[k, gi] + promo - (bajas_vec[gi] if 2 <= gi <= 9 else 0.0)
+
+            #   - Promoción G11 -> G12: simple traspaso desde G11
+            #     bajas en G11 ya aplicadas arriba (si gi=10, corresponde a G11)
+            promo_11_12 = Gk[k, 10] - (bajas_vec[10] if 2 <= 10 <= 9 else 0.0)  # bajas en G11 son 0 por política (fuera 3..10)
+            next_G[11] = Gk[k, 11] + promo_11_12  # sin bajas en G12
+
+            #   - Egreso en 12º: restar egresados (del año anterior)
             next_G[11] = max(next_G[11] - eg_prev, 0.0)
 
             # 3) Divisiones
