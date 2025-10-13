@@ -1,13 +1,12 @@
-# app.py — Streamlit actualizado:
-# - Sueldos fijos (docentes por aula + no docentes)
-# - Sin "docente por aula nueva" ni "admitidos objetivo"
-# - Tope de admitidos por capacidad de G1
-# - Gráfico de Facturación + Rentabilidad (eje secundario)
-# - KPIs en OPEX & Resultados
+# app.py — Unifica controles en el sidebar y simula una sola vez.
+# - Los controles de "básicos/demanda" y "marketing/costos" se crean SOLO una vez.
+# - Se calcula df_base una vez y se usa en todas las pestañas (salvo Expansión, que re-simula localmente).
+# - Esto asegura que cambios de marketing afecten Admitidos y que "AlumnosTotales" en Simulación lo refleje.
 # requirements.txt: streamlit, numpy, pandas, altair
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import altair as alt
 from model.simulate import Params, simulate
 
@@ -28,7 +27,7 @@ if "params" not in st.session_state:
 else:
     st.session_state.params = ensure_params_defaults(st.session_state.params)
 
-# --------- Helpers ---------
+# --------- Sidebar (UNA sola vez) ---------
 def sidebar_basicos_y_demanda(p: Params):
     st.sidebar.header("Horizonte y Demanda")
     p.years = st.sidebar.slider("Años de simulación", 5, 50, p.years)
@@ -50,7 +49,7 @@ def sidebar_basicos_y_demanda(p: Params):
     p.g_inicial = st.sidebar.number_input("Alumnos por grado (inicial)", 0, 200, p.g_inicial)
     p.candidatos_inicial = st.sidebar.number_input("Candidatos (stock inicial)", 0, 200000, int(p.candidatos_inicial))
 
-def sidebar_marketing_y_admision(p: Params):
+def sidebar_marketing_y_costos(p: Params):
     st.sidebar.header("Cuotas y Marketing")
     p.cuota_mensual = st.sidebar.number_input("Cuota mensual ($/est/mes)", 0.0, 100000.0, p.cuota_mensual, 10.0)
     p.prop_mkt = st.sidebar.slider("Proporción resultado → marketing", 0.0, 0.9, p.prop_mkt, 0.01)
@@ -58,71 +57,35 @@ def sidebar_marketing_y_admision(p: Params):
     p.cac_base = st.sidebar.number_input("CAC base ($/candidato)", 1.0, 500_000.0, p.cac_base, 10.0)
     p.k_saturacion = st.sidebar.slider("Sensibilidad CAC a saturación", 0.0, 5.0, p.k_saturacion, 0.1)
 
-    st.sidebar.header("Selección (admisión)")
-    p.politica_seleccion = st.sidebar.slider("Política de selección (% aceptados del stock)", 0.0, 1.0, p.politica_seleccion, 0.01)
-
-def sidebar_costos_inversion_y_calidad(p: Params):
     st.sidebar.header("Costos e inversión (impacto en calidad)")
     p.costo_docente_por_aula = st.sidebar.number_input("Costo docente por AULA ($/año)", 0.0, 2_000_000.0, p.costo_docente_por_aula, 1_000.0)
     p.sueldos_no_docentes = st.sidebar.number_input("Sueldos NO docentes ($/año)", 0.0, 10_000_000.0, p.sueldos_no_docentes, 1_000.0)
-    p.inversion_infra_anual = st.sidebar.number_input("Inversión en infraestructura ($/año)", 0.0, 10_000_000.0, p.inversion_infra_anual, 10_000.0)
-    p.inversion_calidad_por_alumno = st.sidebar.number_input("Inversión en calidad por alumno ($/año)", 0.0, 20_000.0, p.inversion_calidad_por_alumno, 10.0)
+    p.inversion_infra_anual = st.sidebar.number_input("Inversión en infraestructura (target $/año)", 0.0, 10_000_000.0, p.inversion_infra_anual, 10_000.0)
+    p.inversion_calidad_por_alumno = st.sidebar.number_input("Inversión en calidad por alumno (target $/año)", 0.0, 20_000.0, p.inversion_calidad_por_alumno, 10.0)
     p.mantenimiento_pct_facturacion = st.sidebar.slider("% Mantenimiento sobre facturación", 0.0, 0.5, p.mantenimiento_pct_facturacion, 0.01)
 
-    st.sidebar.header("Activos")
-    p.activos_inicial = st.sidebar.number_input("Activos iniciales ($)", 0.0, 50_000_000.0, p.activos_inicial, 10_000.0)
-    p.tasa_depreciacion_anual = st.sidebar.slider("Tasa de depreciación anual", 0.0, 0.3, p.tasa_depreciacion_anual, 0.01)
+sidebar_basicos_y_demanda(st.session_state.params)
+sidebar_marketing_y_costos(st.session_state.params)
 
-def sidebar_financiamiento_y_pipeline(p: Params, key_prefix: str = "fin"):
-    st.sidebar.header("Expansión (pipeline 12 años)")
-    p.pipeline_start_year = st.sidebar.slider(
-        "Año de inicio del pipeline (−1 desactiva)",
-        min_value=-1, max_value=p.years, value=p.pipeline_start_year, key=f"{key_prefix}_pipeline_start_year"
-    )
-    p.costo_construccion_aula = st.sidebar.number_input(
-        "CAPEX por aula nueva ($)",
-        min_value=0.0, max_value=10_000_000.0, value=p.costo_construccion_aula, step=10_000.0,
-        key=f"{key_prefix}_costo_construccion_aula"
-    )
+# --- Simulación base UNA vez (con todos los parámetros del sidebar) ---
+p = st.session_state.params
+df_base, _ = simulate(p)
 
-    st.sidebar.header("Financiamiento")
-    p.caja_inicial = st.sidebar.number_input(
-        "Caja inicial ($)",
-        min_value=0.0, max_value=50_000_000.0, value=p.caja_inicial, step=10_000.0,
-        key=f"{key_prefix}_caja_inicial"
-    )
-    p.pct_capex_financiado = st.sidebar.slider(
-        "% CAPEX financiado", min_value=0.0, max_value=1.0, value=p.pct_capex_financiado, step=0.05,
-        key=f"{key_prefix}_pct_capex_financiado"
-    )
-    p.tasa_interes_deuda = st.sidebar.slider(
-        "Tasa de interés deuda (anual)", min_value=0.0, max_value=0.5, value=p.tasa_interes_deuda, step=0.01,
-        key=f"{key_prefix}_tasa_interes_deuda"
-    )
-    p.anos_amortizacion_deuda = st.sidebar.number_input(
-        "Años de amortización de deuda", min_value=1, max_value=40, value=p.anos_amortizacion_deuda, step=1,
-        key=f"{key_prefix}_anos_amortizacion_deuda"
-    )
-    p.deuda_inicial = st.sidebar.number_input(
-        "Deuda inicial ($)",
-        min_value=0.0, max_value=50_000_000.0, value=p.deuda_inicial, step=10_000.0,
-        key=f"{key_prefix}_deuda_inicial"
-    )
-
-def fold(df: pd.DataFrame, cols: list[str], x="Año") -> pd.DataFrame:
+# --------- Utilidades de gráfico ---------
+def fold(df: pd.DataFrame, cols, x="Año"):
     return df[[x] + cols].melt(id_vars=[x], value_vars=cols, var_name="serie", value_name="valor")
 
-def alt_lines(df_long: pd.DataFrame, title: str, y_title: str):
-    sel = alt.selection_point(fields=["serie"], bind="legend")  # toggle por leyenda
+def alt_lines(df_long: pd.DataFrame, y_title: str):
+    sel = alt.selection_point(fields=["serie"], bind="legend")
     base = alt.Chart(df_long).encode(
         x=alt.X("Año:Q"),
         y=alt.Y("valor:Q", title=y_title),
         color=alt.Color("serie:N", legend=alt.Legend(orient="bottom", columns=3)),
         tooltip=["Año","serie","valor"]
     ).add_params(sel).transform_filter(sel)
-    return (base.mark_line() + base.mark_circle(size=28)).properties(title=title).interactive()
+    return (base.mark_line() + base.mark_circle(size=28)).interactive()
 
-def choose_series(label: str, options: list[str], default: list[str], key: str) -> list[str]:
+def choose_series(label: str, options, default, key: str):
     return st.multiselect(label, options=options, default=default, key=key)
 
 # --------- Tabs ---------
@@ -133,20 +96,12 @@ tab_inicio, tab_sim, tab_mkt, tab_costos, tab_fin, tab_coh, tab_exp, tab_export 
 # --------- Inicio ---------
 with tab_inicio:
     st.markdown("""
-**Novedades del modelo:**
-- **Sueldos** = *costo docente por aula × #aulas* + *sueldos no-docentes*.  
-- Se eliminan **Docente por aula nueva** y **Admitidos objetivo**.
-- **Admitidos** limitados por la **capacidad de 1º grado** (divisiones × cupo máx).
-- **Deuda** crece cada año del pipeline con el **CAPEX financiado** del año; se pagan **intereses** y **amortización** sobre el **saldo**.
-- Gráfico de **Facturación + Rentabilidad** y **KPIs** en OPEX/Resultados.
+**Nota:** los **Admitidos(t)** impactan en **G1(t+1)** (modelo anual). Por eso, al subir marketing vas a ver el efecto en **AlumnosTotales** a partir del año siguiente.
     """)
 
-# --------- Simulación (vista principal) ---------
+# --------- Simulación ---------
 with tab_sim:
-    sidebar_basicos_y_demanda(st.session_state.params)
-    p = st.session_state.params
-    df, _ = simulate(p)
-
+    df = df_base
     c1, c2, c3 = st.columns(3)
     with c1: st.metric("Alumnos (0→fin)", f"{int(df['AlumnosTotales'].iloc[0])} → {int(df['AlumnosTotales'].iloc[-1])}")
     with c2: st.metric("Demanda (0→fin)", f"{int(df['DemandaPotencial'].iloc[0])} → {int(df['DemandaPotencial'].iloc[-1])}")
@@ -155,32 +110,26 @@ with tab_sim:
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Alumnos, Capacidad y Demanda")
-        ac_all = ["AlumnosTotales","Capacidad Máx","Capacidad Ópt","Demanda"]
         ac_df = df[["Año","AlumnosTotales","CapacidadMaxTotal","CapacidadOptTotal","DemandaPotencial"]].rename(
             columns={"CapacidadMaxTotal":"Capacidad Máx","CapacidadOptTotal":"Capacidad Ópt","DemandaPotencial":"Demanda"})
+        ac_all = ["AlumnosTotales","Capacidad Máx","Capacidad Ópt","Demanda"]
         ac_sel = choose_series("Series (Alumnos/Capacidad/Demanda)", ac_all, ["AlumnosTotales","Capacidad Máx","Demanda"], key="sim_ac")
         if ac_sel:
-            st.altair_chart(alt_lines(fold(ac_df, ac_sel), "", "Cantidad"), use_container_width=True)
+            st.altair_chart(alt_lines(fold(ac_df, ac_sel), "Cantidad"), use_container_width=True)
 
     with col2:
         st.subheader("Admitidos, Rechazados, Egresados y Bajas")
         flows_all = ["Admitidos","Rechazados","Egresados","BajasTotales"]
         flows_sel = choose_series("Series (Flujos)", flows_all, ["Admitidos","Egresados","BajasTotales"], key="sim_flows")
         if flows_sel:
-            st.altair_chart(alt_lines(fold(df, flows_sel), "", "Personas/año"), use_container_width=True)
+            st.altair_chart(alt_lines(fold(df, flows_sel), "Personas/año"), use_container_width=True)
 
     st.subheader("Calidad percibida")
     st.line_chart(df, x="Año", y="Calidad", use_container_width=True)
 
-    st.caption("Tabla (primeros años)")
-    st.dataframe(df.head(20), use_container_width=True)
-
 # --------- Marketing & Admisión ---------
 with tab_mkt:
-    sidebar_marketing_y_admision(st.session_state.params)
-    p = st.session_state.params
-    df, _ = simulate(p)
-
+    df = df_base
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Candidatos (stock)")
@@ -190,87 +139,72 @@ with tab_mkt:
         fl_all = ["NuevosCandidatos","Admitidos","Rechazados"]
         fl_sel = choose_series("Series (Funnel)", fl_all, fl_all, key="mkt_funnel")
         if fl_sel:
-            st.altair_chart(alt_lines(fold(df, fl_sel), "", "Personas/año"), use_container_width=True)
+            st.altair_chart(alt_lines(fold(df, fl_sel), "Personas/año"), use_container_width=True)
 
     with c2:
         st.subheader("Marketing y CAC")
         bc_all = ["Marketing","CAC"]
         bc_sel = choose_series("Series (Budget/CAC)", bc_all, bc_all, key="mkt_bc")
         if bc_sel:
-            st.altair_chart(alt_lines(fold(df, bc_sel), "", "Valor"), use_container_width=True)
+            st.altair_chart(alt_lines(fold(df, bc_sel), "Valor"), use_container_width=True)
         st.subheader("Demanda potencial")
         st.line_chart(df, x="Año", y="DemandaPotencial", use_container_width=True)
 
 # --------- OPEX & Resultados ---------
 with tab_costos:
-    sidebar_costos_inversion_y_calidad(st.session_state.params)
-    p = st.session_state.params
-    df, _ = simulate(p)
-
+    df = df_base
     # KPIs (último año)
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
     last = df.iloc[-1]
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
     with k1: st.metric("Facturación (fin)", f"${last['Facturacion']:,.0f}")
-    with k2: st.metric("OPEX (fin)", f"${last['CostosOPEX']:,.0f}")
-    with k3: st.metric("Resultado Operativo (fin)", f"${last['ResultadoOperativo']:,.0f}")
+    with k2: st.metric("Costos Totales (cash)", f"${last['CostosTotalesCash']:,.0f}")
+    with k3: st.metric("OPEX (fin)", f"${last['CostosOPEX']:,.0f}")
     with k4: st.metric("Resultado Neto (fin)", f"${last['ResultadoNeto']:,.0f}")
-    with k5: st.metric("Margen Neto (fin)", f"{last['MargenNeto']*100:.1f}%")
+    with k5: st.metric("Caja (fin)", f"${last['Caja']:,.0f}")
     with k6: st.metric("Deuda (fin)", f"${last['Deuda']:,.0f}")
 
-    st.subheader("Facturación + Rentabilidad")
-    # Capa 1: barras de facturación
-    bars = alt.Chart(df).mark_bar(opacity=0.7).encode(
-        x="Año:Q",
-        y=alt.Y("Facturacion:Q", title="Facturación ($/año)"),
-        tooltip=["Año","Facturacion"]
-    )
-    # Capa 2: línea de Margen Neto (%) con eje secundario
-    line = alt.Chart(df).mark_line(point=True).encode(
-        x="Año:Q",
-        y=alt.Y("MargenNeto:Q", axis=alt.Axis(title="Margen Neto (%)", format="%")),
-        color=alt.value("#1f77b4"),
-        tooltip=[alt.Tooltip("Año:Q"), alt.Tooltip("MargenNeto:Q", format=".1%")]
-    )
-    chart = alt.layer(bars, line).resolve_scale(y='independent')
-    st.altair_chart(chart, use_container_width=True)
+    st.subheader("Facturación vs Costos Totales vs Rentabilidad ($/año)")
+    series_fcr = ["Facturacion","CostosTotalesCash","ResultadoNeto"]
+    st.altair_chart(alt_lines(fold(df, series_fcr), "$/año"), use_container_width=True)
 
-    st.subheader("Composición OPEX (stacked)")
-    opex_all = ["Sueldos","InversionInfra","InversionCalidadAlumno","Mantenimiento","Marketing"]
-    opex_sel = choose_series("Partidas OPEX", opex_all, opex_all, key="opex_parts")
-    if opex_sel:
-        opex_long = fold(df, opex_sel)
-        stack = alt.Chart(opex_long).mark_area().encode(
-            x="Año:Q",
-            y=alt.Y("valor:Q", stack="zero", title="$ por año"),
-            color=alt.Color("serie:N", legend=alt.Legend(orient="bottom", columns=3)),
-            tooltip=["Año","serie","valor"]
-        ).interactive()
-        st.altair_chart(stack, use_container_width=True)
+    st.subheader("Composición OPEX — Absoluto ($/año)")
+    opex_parts = ["Sueldos","InversionInfra","InversionCalidadAlumno","Mantenimiento","Marketing"]
+    opex_long = fold(df, opex_parts)
+    stack_abs = alt.Chart(opex_long).mark_area().encode(
+        x="Año:Q",
+        y=alt.Y("valor:Q", stack="zero", title="$ por año"),
+        color=alt.Color("serie:N", legend=alt.Legend(orient="bottom", columns=3)),
+        tooltip=["Año","serie","valor"]
+    ).interactive()
+    st.altair_chart(stack_abs, use_container_width=True)
 
-    st.subheader("Resultados y CAPEX")
-    res_all = ["ResultadoOperativo","ResultadoNeto","CAPEX_Total","CAPEX_Propio","CAPEX_Financiado"]
-    res_sel = choose_series("Series (Resultados/CAPEX)", res_all, ["ResultadoOperativo","ResultadoNeto","CAPEX_Total"], key="res_capex")
-    if res_sel:
-        st.altair_chart(alt_lines(fold(df, res_sel), "", "$ por año"), use_container_width=True)
+    st.subheader("Composición OPEX — % de Facturación")
+    df_pct = df.copy()
+    for c in opex_parts:
+        df_pct[c] = (df_pct[c] / df_pct["Facturacion"]).fillna(0.0).replace([np.inf, -np.inf], 0.0)
+    opex_pct_long = fold(df_pct, opex_parts)
+    stack_pct = alt.Chart(opex_pct_long).mark_area().encode(
+        x="Año:Q",
+        y=alt.Y("valor:Q", stack="normalize", title="% de facturación"),
+        color=alt.Color("serie:N", legend=alt.Legend(orient="bottom", columns=3)),
+        tooltip=["Año","serie",alt.Tooltip("valor:Q", format=".1%")]
+    ).interactive()
+    st.altair_chart(stack_pct, use_container_width=True)
 
 # --------- Caja & Deuda ---------
 with tab_fin:
-    sidebar_financiamiento_y_pipeline(st.session_state.params, key_prefix="fin")
-    p = st.session_state.params
-    df, _ = simulate(p)
-
+    df = df_base
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Caja y Deuda (stocks)")
-        st.altair_chart(alt_lines(fold(df, ["Caja","Deuda"]), "", "$"), use_container_width=True)
+        st.altair_chart(alt_lines(fold(df, ["Caja","Deuda"]), "$"), use_container_width=True)
     with c2:
         st.subheader("Intereses y Amortización (flujos)")
-        st.altair_chart(alt_lines(fold(df, ["InteresDeuda","AmortizacionDeuda"]), "", "$/año"), use_container_width=True)
+        st.altair_chart(alt_lines(fold(df, ["InteresDeuda","AmortizacionDeuda"]), "$/año"), use_container_width=True)
 
 # --------- Cohortes ---------
 with tab_coh:
-    p = st.session_state.params
-    df, _ = simulate(p)
+    df = df_base
     st.subheader("Alumnos por grado (G1..G12)")
     g_cols = [f"G{i}" for i in range(1,13)]
     gdf = df[["Año"] + g_cols].copy()
@@ -281,14 +215,48 @@ with tab_coh:
         tooltip=["Año","Grado","Alumnos"]
     ).properties(height=560)
     st.altair_chart(heat, use_container_width=True)
-    st.caption("Tabla (primeros años)")
-    st.dataframe(gdf.head(20), use_container_width=True)
 
 # --------- Expansión / Pipeline ---------
+def exp_controls_in_body(p: Params, key_prefix: str = "exp"):
+    st.subheader("Parámetros de Expansión y Financiamiento")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        p.pipeline_start_year = st.number_input(
+            "Año de inicio del pipeline (−1 desactiva)", min_value=-1, max_value=p.years, value=p.pipeline_start_year, step=1,
+            key=f"{key_prefix}_pipeline_start_year"
+        )
+        p.costo_construccion_aula = st.number_input(
+            "CAPEX por aula nueva ($)", min_value=0.0, max_value=10_000_000.0, value=p.costo_construccion_aula, step=10_000.0,
+            key=f"{key_prefix}_capex_aula"
+        )
+    with c2:
+        p.pct_capex_financiado = st.slider(
+            "% CAPEX financiado", min_value=0.0, max_value=1.0, value=p.pct_capex_financiado, step=0.05,
+            key=f"{key_prefix}_pct_fin"
+        )
+        p.tasa_interes_deuda = st.slider(
+            "Tasa de interés deuda (anual)", min_value=0.0, max_value=0.5, value=p.tasa_interes_deuda, step=0.01,
+            key=f"{key_prefix}_tasa_int"
+        )
+    with c3:
+        p.anos_amortizacion_deuda = st.number_input(
+            "Años de amortización de deuda", min_value=1, max_value=40, value=p.anos_amortizacion_deuda, step=1,
+            key=f"{key_prefix}_anos_amort"
+        )
+        p.caja_inicial = st.number_input(
+            "Caja inicial ($)", min_value=0.0, max_value=50_000_000.0, value=p.caja_inicial, step=10_000.0,
+            key=f"{key_prefix}_caja_ini"
+        )
+        p.deuda_inicial = st.number_input(
+            "Deuda inicial ($)", min_value=0.0, max_value=50_000_000.0, value=p.deuda_inicial, step=10_000.0,
+            key=f"{key_prefix}_deuda_ini"
+        )
+
 with tab_exp:
-    sidebar_financiamiento_y_pipeline(st.session_state.params, key_prefix="exp")
+    # Controles SOLO aquí y simulación local para esta pestaña:
+    exp_controls_in_body(st.session_state.params, key_prefix="exp")
     p = st.session_state.params
-    df, _ = simulate(p)
+    df = simulate(p)[0]
 
     c1, c2 = st.columns(2)
     with c1:
@@ -305,8 +273,7 @@ with tab_exp:
 
 # --------- Exportar ---------
 with tab_export:
-    p = st.session_state.params
-    df, meta = simulate(p)
+    df, meta = df_base, {"params": st.session_state.params.__dict__}
     st.download_button(
         "Descargar CSV de resultados",
         data=df.to_csv(index=False).encode("utf-8"),
