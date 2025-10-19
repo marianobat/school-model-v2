@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -24,10 +25,47 @@ def ensure_params_defaults(p):
             setattr(p, k, v)
     return p
 
+def canonicalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Renombra columnas a los nombres esperados por la app.
+    Añade aquí cualquier mapeo adicional si cambian nombres en tu modelo.
+    """
+    colmap = {}
+    # Estándares que usa la app:
+    if "Alumnos" not in df.columns and "AlumnosTotales" in df.columns:
+        colmap["AlumnosTotales"] = "Alumnos"
+    if "CostosOperativos" not in df.columns and "CostosOPEX" in df.columns:
+        colmap["CostosOPEX"] = "CostosOperativos"
+    if "ResultadoNeto" not in df.columns and "Resultado" in df.columns:
+        colmap["Resultado"] = "ResultadoNeto"
+    if "Facturacion" not in df.columns and "Ingresos" in df.columns:
+        colmap["Ingresos"] = "Facturacion"
+    if "Caja" not in df.columns and "Cash" in df.columns:
+        colmap["Cash"] = "Caja"
+    if "NuevosCandidatos" not in df.columns and "Candidatos" in df.columns:
+        colmap["Candidatos"] = "NuevosCandidatos"
+    if "Rechazados" not in df.columns and "NoAdmitidos" in df.columns:
+        colmap["NoAdmitidos"] = "Rechazados"
+    if "Admitidos" not in df.columns and "Ingresantes" in df.columns:
+        colmap["Ingresantes"] = "Admitidos"
+    if "Calidad" not in df.columns and "IndiceCalidad" in df.columns:
+        colmap["IndiceCalidad"] = "Calidad"
+    if not colmap:
+        return df
+    return df.rename(columns=colmap)
+
 def fold(df: pd.DataFrame, cols, x="Año"):
+    # Garantiza que existan las columnas a graficar
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        st.warning(f"Faltan columnas para graficar: {missing}")
+        cols = [c for c in cols if c in df.columns]
+        if not cols:
+            return pd.DataFrame({x: [], "serie": [], "valor": []})
     return df[[x] + cols].melt(id_vars=[x], value_vars=cols, var_name="serie", value_name="valor")
 
 def alt_lines(df_long: pd.DataFrame, y_title: str):
+    if df_long.empty:
+        return alt.Chart(pd.DataFrame({"Año": [], "valor": [], "serie": []})).mark_line()
     sel = alt.selection_point(fields=["serie"], bind="legend")
     base = alt.Chart(df_long).encode(
         x=alt.X("Año:Q", axis=alt.Axis(grid=True)),
@@ -38,19 +76,32 @@ def alt_lines(df_long: pd.DataFrame, y_title: str):
     return base.mark_line(point=True).add_params(sel).transform_filter(sel).properties(height=280)
 
 def kpis(df: pd.DataFrame):
+    # Evita KeyError si faltan columnas
+    required = ["Alumnos","Calidad","Facturacion","ResultadoNeto","Caja"]
+    for r in required:
+        if r not in df.columns:
+            st.warning(f"KPIs: falta la columna '{r}'. Revísala en el modelo o en 'canonicalize_columns'.")
+    # Usa valores existentes con fallback a 0
+    def get(row, key, default=0):
+        return row[key] if key in row and pd.notna(row[key]) else default
+
     c1, c2, c3, c4, c5 = st.columns(5)
     first, last = df.iloc[0], df.iloc[-1]
-    delta_fmt = lambda v0, v1: f"{( (v1 - v0) / v0 * 100.0 ):.1f}%" if v0 else "—"
+    def delta_fmt(v0, v1):
+        try:
+            return f"{((v1 - v0) / v0 * 100.0):.1f}%" if v0 else "—"
+        except Exception:
+            return "—"
     with c1:
-        st.metric("Alumnos", int(last["Alumnos"]), delta=delta_fmt(first["Alumnos"], last["Alumnos"]))
+        st.metric("Alumnos", int(get(last, "Alumnos")), delta=delta_fmt(get(first, "Alumnos"), get(last, "Alumnos")))
     with c2:
-        st.metric("Calidad", f"{last['Calidad']:.2f}", delta=f"{(last['Calidad']-first['Calidad']):+.2f}")
+        st.metric("Calidad", f"{get(last, 'Calidad', 0):.2f}", delta=f"{(get(last,'Calidad',0)-get(first,'Calidad',0)):+.2f}")
     with c3:
-        st.metric("Facturación anual", f"$ {int(last['Facturacion'])}", delta=int(last["Facturacion"]-first["Facturacion"]))
+        st.metric("Facturación anual", f"$ {int(get(last, 'Facturacion'))}", delta=int(get(last,"Facturacion")-get(first,"Facturacion")))
     with c4:
-        st.metric("Resultado Neto", f"$ {int(last['ResultadoNeto'])}", delta=int(last["ResultadoNeto"]-first["ResultadoNeto"]))
+        st.metric("Resultado Neto", f"$ {int(get(last, 'ResultadoNeto'))}", delta=int(get(last,"ResultadoNeto")-get(first,"ResultadoNeto")))
     with c5:
-        st.metric("Caja", f"$ {int(last['Caja'])}", delta=int(last["Caja"]-first["Caja"]))
+        st.metric("Caja", f"$ {int(get(last, 'Caja'))}", delta=int(get(last,"Caja")-get(first,"Caja")))
 
 def load_params_from_json(txt: str):
     try:
@@ -98,15 +149,21 @@ if st.sidebar.button("Aplicar preset", use_container_width=True):
         p = Params()
     elif preset.startswith("📉"):
         p = Params()
-        p.tasa_descenso_demanda = 0.08
+        # suposición: tu modelo use 'tasa_descenso_demanda' o similar
+        if hasattr(p, "tasa_descenso_demanda"):
+            p.tasa_descenso_demanda = 0.08
     elif preset.startswith("💸"):
         p = Params()
-        p.cac_base = p.cac_base * 1.3
-        p.politica_seleccion = max(0.0, p.politica_seleccion - 0.10)
+        if hasattr(p, "cac_base"):
+            p.cac_base = p.cac_base * 1.3
+        if hasattr(p, "politica_seleccion"):
+            p.politica_seleccion = max(0.0, p.politica_seleccion - 0.10)
     elif preset.startswith("🎓"):
         p = Params()
-        p.inversion_calidad_por_alumno = p.inversion_calidad_por_alumno * 1.2
-        p.cupo_optimo = max(10, p.cupo_optimo - 2)
+        if hasattr(p, "inversion_calidad_por_alumno"):
+            p.inversion_calidad_por_alumno = p.inversion_calidad_por_alumno * 1.2
+        if hasattr(p, "cupo_optimo"):
+            p.cupo_optimo = max(10, p.cupo_optimo - 2)
     st.session_state.params = ensure_params_defaults(p)
     st.success("Preset aplicado.")
 
@@ -148,6 +205,7 @@ with tab_inicio:
 with tab_sim:
     # Ejecutar simulación
     df, meta = simulate(st.session_state.params)
+    df = canonicalize_columns(df)
     kpis(df)
     st.subheader("Alumnos, Calidad y Resultado Neto")
     cols = ["Alumnos", "Calidad", "ResultadoNeto"]
@@ -165,11 +223,11 @@ with tab_sim:
     c3, c4 = st.columns(2)
     with c3:
         if st.button("📌 Guardar Snapshot A"):
-            st.session_state.snapA = {"df": df.copy(), "params": meta["params"]}
+            st.session_state.snapA = {"df": df.copy(), "params": meta.get("params", {})}
             st.success("Snapshot A guardado.")
     with c4:
         if st.button("📌 Guardar Snapshot B"):
-            st.session_state.snapB = {"df": df.copy(), "params": meta["params"]}
+            st.session_state.snapB = {"df": df.copy(), "params": meta.get("params", {})}
             st.success("Snapshot B guardado.")
 
 with tab_comp:
@@ -180,12 +238,12 @@ with tab_comp:
         st.warning("Faltan snapshots A y/o B.")
     else:
         st.success("Comparando snapshots guardados.")
-        dfA = snapA["df"].assign(escenario="A")
-        dfB = snapB["df"].assign(escenario="B")
+        dfA = canonicalize_columns(snapA["df"]).assign(escenario="A")
+        dfB = canonicalize_columns(snapB["df"]).assign(escenario="B")
         dfC = pd.concat([dfA, dfB], ignore_index=True)
 
         def comp_chart(cols, ytitle):
-            long = dfC[["Año","escenario"] + cols].melt(id_vars=["Año","escenario"], var_name="serie", value_name="valor")
+            long = dfC[["Año","escenario"] + [c for c in cols if c in dfC.columns]].melt(id_vars=["Año","escenario"], var_name="serie", value_name="valor")
             long["serie"] = long["escenario"] + " · " + long["serie"]
             return alt_lines(long, ytitle)
 
@@ -197,10 +255,10 @@ with tab_comp:
             c1, c2 = st.columns(2)
             with c1:
                 st.write("**Snapshot A — parámetros**")
-                st.json(snapA["params"])
+                st.json(snapA.get("params", {}))
             with c2:
                 st.write("**Snapshot B — parámetros**")
-                st.json(snapB["params"])
+                st.json(snapB.get("params", {}))
 
 with tab_actividades:
     st.markdown(dedent("""
@@ -222,9 +280,12 @@ with tab_actividades:
 with tab_export:
     st.subheader("Descargar resultados y preset")
     df, meta = simulate(st.session_state.params)
+    df = canonicalize_columns(df)
     st.download_button("Descargar resultados (.csv)", data=df.to_csv(index=False).encode("utf-8"),
                        file_name="resultados_simulacion.csv", mime="text/csv", use_container_width=True)
-    st.download_button("Descargar preset (.json)", data=pd.Series(meta["params"]).to_json().encode("utf-8"),
+    # meta.get('params', {}) permite no romper si tu simulate no devuelve params
+    params_json = pd.Series(meta.get("params", {})).to_json()
+    st.download_button("Descargar preset (.json)", data=params_json.encode("utf-8"),
                        file_name="preset_params.json", mime="application/json", use_container_width=True)
     with st.expander("Parámetros actuales"):
-        st.json(meta["params"])
+        st.json(meta.get("params", {}))
